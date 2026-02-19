@@ -40,9 +40,10 @@ By default, the bot uses long polling (`TELEGRAM_MODE=polling`), so you can mess
 ## Telegram bootstrap (current milestone)
 
 - Set `TELEGRAM_BOT_TOKEN` in `.env`.
+- Set llm-service vars in `.env`: `LLM_SERVICE_BASE_URL`, `LLM_SERVICE_HMAC_SECRET`, `LLM_PROVIDER`, `LLM_MODEL`.
 - Start the server with `npm run dev`.
 - Send `/start` to your bot, then any text message.
-- The server logs incoming messages (`chatId`, `userId`, `text`) and the bot replies with an acknowledgement.
+- The server logs incoming messages (`chatId`, `userId`, `text`), forwards text to `llm-service`, and replies with model output.
 
 ## Project structure
 
@@ -66,3 +67,10 @@ For deployed environments (e.g. EigenCompute), set:
 - optional `TELEGRAM_WEBHOOK_SECRET`
 
 Then the server exposes `POST /telegram/webhook` and auto-registers the webhook URL with Telegram.
+
+## llm-service request flow
+
+- Incoming Telegram text becomes `messages` payload for `POST /v1/chat` on `llm-service`.
+- The request is HMAC-signed with `x-timestamp` and `x-signature` (same scheme as backend).
+- Required body fields sent: `provider`, `model`, `messages`, `requestId`, `userId` (plus `temperature` from env).
+- The agent returns `data.text` from `llm-service` back to the same Telegram chat.

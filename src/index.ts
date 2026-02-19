@@ -1,13 +1,22 @@
 import { createTelegramBot, registerBotHandlers } from './bot/register';
 import { loadEnv } from './config/env';
 import { createServer, registerWebhookRoute } from './server/create-server';
+import { LlmServiceClient } from './services/planner-client';
 
 async function main() {
   const env = loadEnv();
   const server = createServer(env.mode);
   const bot = createTelegramBot(env.telegramBotToken);
+  const llmClient = new LlmServiceClient({
+    baseUrl: env.llmServiceBaseUrl,
+    hmacSecret: env.llmServiceHmacSecret,
+    provider: env.llmProvider,
+    model: env.llmModel,
+    temperature: env.llmTemperature,
+    systemPrompt: env.llmSystemPrompt,
+  });
 
-  registerBotHandlers(bot, server.log);
+  registerBotHandlers(bot, server.log, llmClient);
 
   if (env.mode === 'webhook') {
     registerWebhookRoute(server, bot, env.telegramWebhookPath);
