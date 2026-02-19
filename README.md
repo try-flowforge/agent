@@ -40,10 +40,11 @@ By default, the bot uses long polling (`TELEGRAM_MODE=polling`), so you can mess
 ## Telegram bootstrap (current milestone)
 
 - Set `TELEGRAM_BOT_TOKEN` in `.env`.
-- Set llm-service vars in `.env`: `LLM_SERVICE_BASE_URL`, `LLM_SERVICE_HMAC_SECRET`, `LLM_PROVIDER`, `LLM_MODEL`.
+- Set llm-service vars in `.env`: `LLM_SERVICE_BASE_URL`, `LLM_SERVICE_HMAC_SECRET`.
+- Optional for context enrichment: `BACKEND_BASE_URL`, `BACKEND_SERVICE_KEY`, `BACKEND_CONTEXT_PATH`.
 - Start the server with `npm run dev`.
 - Send `/start` to your bot, then any text message.
-- The server logs incoming messages (`chatId`, `userId`, `text`), forwards text to `llm-service`, and replies with model output.
+- The server logs incoming messages (`chatId`, `userId`, `text`) and replies with structured workflow drafts.
 
 ## Project structure
 
@@ -55,6 +56,7 @@ Current scaffold aligned to the planned full service:
 - `src/bot/commands/` - Telegram slash commands
 - `src/bot/handlers/` - Telegram event handlers
 - `src/services/` - planner/compiler/backend integration modules (scaffolded)
+- `src/planner/` - planner prompt context, schema, and block catalog
 - `src/state/` - in-memory stores (session scaffold)
 - `src/types/` - shared domain types
 
@@ -72,5 +74,13 @@ Then the server exposes `POST /telegram/webhook` and auto-registers the webhook 
 
 - Incoming Telegram text becomes `messages` payload for `POST /v1/chat` on `llm-service`.
 - The request is HMAC-signed with `x-timestamp` and `x-signature` (same scheme as backend).
-- Required body fields sent: `provider`, `model`, `messages`, `requestId`, `userId` (plus `temperature` from env).
-- The agent returns `data.text` from `llm-service` back to the same Telegram chat.
+- Required body fields sent: `provider`, `model`, `messages`, `requestId`, `userId` (temperature fixed in code).
+- Model selection is fixed in code: prefer `eigencloud-gpt-oss`, then `eigencloud-qwen3`, then fallback `openai-chatgpt`.
+- Retry policy: each selected model is retried with exponential backoff before model failover.
+- The agent sends planner-specific system context, validates planner output, and returns a structured workflow draft to Telegram.
+
+## Backend context enrichment
+
+- If planner output has missing fields, the agent can request safe user context from backend (`POST BACKEND_CONTEXT_PATH`).
+- Only allowlisted fields are injected back into the planner prompt (`userAddress`, `privyUserId`, `telegramChatId`, `preferredChains`, `preferredTokens`, `riskProfile`, `slippageBps`).
+- Missing/failed backend context fetch does not break planning; the flow continues without enrichment.

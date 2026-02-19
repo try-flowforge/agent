@@ -1,6 +1,7 @@
 import { createTelegramBot, registerBotHandlers } from './bot/register';
 import { loadEnv } from './config/env';
 import { createServer, registerWebhookRoute } from './server/create-server';
+import { BackendContextClient } from './services/backend-client';
 import { LlmServiceClient } from './services/planner-client';
 
 async function main() {
@@ -10,13 +11,15 @@ async function main() {
   const llmClient = new LlmServiceClient({
     baseUrl: env.llmServiceBaseUrl,
     hmacSecret: env.llmServiceHmacSecret,
-    provider: env.llmProvider,
-    model: env.llmModel,
-    temperature: env.llmTemperature,
     systemPrompt: env.llmSystemPrompt,
   });
+  const backendContextClient = new BackendContextClient({
+    baseUrl: env.backendBaseUrl,
+    serviceKey: env.backendServiceKey,
+    contextPath: env.backendContextPath,
+  });
 
-  registerBotHandlers(bot, server.log, llmClient);
+  registerBotHandlers(bot, server.log, llmClient, backendContextClient);
 
   if (env.mode === 'webhook') {
     registerWebhookRoute(server, bot, env.telegramWebhookPath);
