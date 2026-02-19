@@ -31,8 +31,38 @@ Built for the EigenCloud Open Innovation Challenge as a verifiable agent - deter
 ```bash
 npm install
 cp .env.example .env
-# Edit .env with your values
+# Edit .env with TELEGRAM_BOT_TOKEN
 npm run dev
 ```
 
-For production, the service is containerized and intended for deployment (e.g. EigenCompute) with a public webhook URL for Telegram.
+By default, the bot uses long polling (`TELEGRAM_MODE=polling`), so you can message your bot immediately and see logs in the server output.
+
+## Telegram bootstrap (current milestone)
+
+- Set `TELEGRAM_BOT_TOKEN` in `.env`.
+- Start the server with `npm run dev`.
+- Send `/start` to your bot, then any text message.
+- The server logs incoming messages (`chatId`, `userId`, `text`) and the bot replies with an acknowledgement.
+
+## Project structure
+
+Current scaffold aligned to the planned full service:
+
+- `src/index.ts` - composition root and startup flow
+- `src/config/` - env parsing and runtime config
+- `src/server/` - Fastify app and webhook route wiring
+- `src/bot/commands/` - Telegram slash commands
+- `src/bot/handlers/` - Telegram event handlers
+- `src/services/` - planner/compiler/backend integration modules (scaffolded)
+- `src/state/` - in-memory stores (session scaffold)
+- `src/types/` - shared domain types
+
+## Webhook mode (optional)
+
+For deployed environments (e.g. EigenCompute), set:
+
+- `TELEGRAM_MODE=webhook`
+- `APP_BASE_URL=https://your-public-domain`
+- optional `TELEGRAM_WEBHOOK_SECRET`
+
+Then the server exposes `POST /telegram/webhook` and auto-registers the webhook URL with Telegram.

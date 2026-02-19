@@ -1,64 +1,49 @@
-import dotenv from 'dotenv';
-import Fastify from 'fastify';
-import { randomBytes } from 'node:crypto';
-import { hashMessage } from 'viem';
-import { mnemonicToAccount } from 'viem/accounts';
-
-dotenv.config();
+import { createTelegramBot, registerBotHandlers } from './bot/register';
+import { loadEnv } from './config/env';
+import { createServer, registerWebhookRoute } from './server/create-server';
 
 async function main() {
-  const mnemonic = process.env.MNEMONIC;
+  const env = loadEnv();
+  const server = createServer(env.mode);
+  const bot = createTelegramBot(env.telegramBotToken);
 
-  if (!mnemonic) {
-    console.error('MNEMONIC environment variable is not set');
+  registerBotHandlers(bot, server.log);
+
+  if (env.mode === 'webhook') {
+    registerWebhookRoute(server, bot, env.telegramWebhookPath);
+
+    if (env.appBaseUrl) {
+      const normalizedBaseUrl = env.appBaseUrl.replace(/\/$/, '');
+      const webhookUrl = `${normalizedBaseUrl}${env.telegramWebhookPath}`;
+      await bot.api.setWebhook(webhookUrl, {
+        secret_token: env.telegramWebhookSecret,
+      });
+      server.log.info({ webhookUrl }, 'Telegram webhook configured');
+    } else {
+      server.log.warn('APP_BASE_URL is not set; webhook is not auto-registered');
+    }
+  }
+
+  try {
+    await server.listen({ port: env.port, host: '0.0.0.0' });
+    server.log.info({ mode: env.mode, port: env.port }, 'Agent server started');
+  } catch (error) {
+    server.log.error(error, 'Failed to start server');
     process.exit(1);
   }
 
-  // Derive the application's signing account from the provided mnemonic
-  let account;
-  try {
-    account = mnemonicToAccount(mnemonic);
-  } catch (error) {
-    console.error('Error deriving signing account:', error);
-    process.exit(1);
-  }
-
-  const server = Fastify({ logger: true });
-
-  // Endpoint that generates random numbers and attests to them with the application's wallet
-  server.get('/random', async () => {
-    // Generate cryptographically secure random number
-    const entropy = randomBytes(32);
-    const randomNumber = `0x${entropy.toString('hex')}`;
-    const randomNumberDecimal = BigInt(randomNumber).toString();
-    const timestamp = new Date().toISOString();
-    const message = `RandomnessBeacon|${randomNumber}|${timestamp}`;
-    const messageHash = hashMessage(message);
-
-    // Sign the message using the application's wallet to attest to the random value
-    const signature = await account.signMessage({ message });
-
-    return {
-      randomNumber,
-      randomNumberDecimal,
-      timestamp,
-      message,
-      messageHash,
-      signature,
-      signer: account.address,
-    };
-  });
-
-  const port = Number(process.env.PORT ?? 8080);
-  try {
-    await server.listen({ port, host: '0.0.0.0' });
-  } catch (error) {
-    server.log.error(error);
-    process.exit(1);
+  if (env.mode === 'polling') {
+    server.log.info('Starting Telegram bot in long polling mode');
+    await bot.start({
+      drop_pending_updates: true,
+      onStart: () => {
+        server.log.info('Telegram bot polling started');
+      },
+    });
   }
 }
 
 main().catch((error) => {
-  console.error('Fatal error starting server:', error);
+  console.error('Fatal error starting agent:', error);
   process.exit(1);
 });
