@@ -231,35 +231,53 @@ export function registerTextMessageHandler(
       );
 
       // Detect if we need an on-chain action (swap, supply, borrow)
-      const onChainBlocks = ['uniswap', 'lifi', 'lending']; // based on alias map in planner-client
-      const hasOnChainAction = plannerResult.steps.some(step => onChainBlocks.includes(step.blockId));
+      const onChainBlockIds = ['uniswap', 'lifi', 'lending']; // based on alias map in planner-client
+      const onChainSteps = plannerResult.steps.filter(step => onChainBlockIds.includes(step.blockId));
+      const hasOnChainAction = onChainSteps.length > 0;
 
       let replyText = formatPlannerReply(plannerResult);
 
-      if (hasOnChainAction) {
-        if (plannerResult.missingInputs.length === 0) {
-          const swapStep = plannerResult.steps.find(step => onChainBlocks.includes(step.blockId));
-          const hints = swapStep?.configHints || {};
+      if (hasOnChainAction && plannerResult.missingInputs.length === 0) {
+        logger.info({ chatId, stepCount: onChainSteps.length }, 'Building transaction intent for on-chain action(s)');
 
-          logger.info({ chatId, blockId: swapStep?.blockId }, 'Creating transaction intent for on-chain action');
+        // Determine the chain and numeric chain ID from the first step's hints
+        const firstHints = onChainSteps[0]?.configHints || {};
+        const chainStr = (firstHints.chain as string) || 'ARBITRUM';
+        const chainIdMap: Record<string, number> = {
+          ARBITRUM: 42161, ARBITRUM_SEPOLIA: 421614,
+          BASE: 8453, ETHEREUM: 1, ETHEREUM_SEPOLIA: 11155111,
+        };
+        const chainId = chainIdMap[chainStr] ?? 42161;
 
-          const intentData = await backendContextClient.createTransactionIntent({
-            userId: agentUserId,
-            agentUserId: agentUserId,
-            safeAddress: '0x0000000000000000000000000000000000000000', // We will resolve the real safe address on the frontend during signing
-            chainId: hints.chain || 'ARBITRUM',
-            to: hints.destinationToken || '0x',
-            value: hints.amount || '0',
-            data: '0x',
-            description: plannerResult.description,
-          });
+        // Resolve the user's Safe address from their planner context
+        const plannerContext = await backendContextClient.fetchPlannerContext({
+          userId: agentUserId,
+          chatId: String(chatId),
+          requestedFields: ['safeAddress'],
+          prompt: '',
+        });
+        const safeAddress = (plannerContext?.safeAddress as string) || '0x0000000000000000000000000000000000000000';
 
-          if (intentData) {
-            const magicLink = `https://flowforge.app/agent-onboarding?intentId=${intentData.id}`;
-            replyText += `\n\n🔗 *Action Required:*\nI've prepared a transaction for this. Please review and sign it here:\n[Sign Transaction](${magicLink})`;
-          } else {
-            replyText += `\n\n⚠️ Could not prepare a transaction intent. Please try again.`;
-          }
+        // Map planner steps to BuildIntentStep format
+        const steps = onChainSteps.map(step => ({
+          blockType: (step.blockId === 'lending' ? 'lending' : 'swap') as 'swap' | 'lending',
+          configHints: step.configHints as Record<string, string | number>,
+        }));
+
+        const intentData = await backendContextClient.buildTransactionIntent({
+          userId: agentUserId,
+          agentUserId,
+          safeAddress,
+          chainId,
+          description: plannerResult.description,
+          steps,
+        });
+
+        if (intentData) {
+          const magicLink = `https://flowforge.app/agent-onboarding?intentId=${intentData.id}`;
+          replyText += `\n\n🔗 *Action Required:*\nI've prepared a transaction for this. Please review and sign it here:\n[Sign Transaction](${magicLink})`;
+        } else {
+          replyText += `\n\n⚠️ Could not prepare a transaction. Please try again.`;
         }
       }
 
