@@ -14,6 +14,8 @@ interface LlmClientConfig {
   baseUrl: string;
   hmacSecret: string;
   systemPrompt?: string;
+  /** Request timeout in ms. */
+  requestTimeoutMs?: number;
 }
 
 interface LlmModelDefinition {
@@ -70,10 +72,14 @@ export class LlmServiceClient {
         const message = error instanceof Error ? error.message : String(error);
         failures.push(`${HARD_CODED_MODEL.id} attempt ${attempt}: ${message}`);
 
-        if (attempt < MAX_RETRIES_PER_MODEL) {
-          const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-          await sleep(delay);
+        const retryable = isRetryablePlannerError(error);
+        if (!retryable || attempt >= MAX_RETRIES_PER_MODEL) {
+          const detail = failures.slice(-4).join(' | ');
+          throw new Error(`Planner request failed after retries. ${detail}`);
         }
+
+        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        await sleep(delay);
       }
     }
 
@@ -99,7 +105,11 @@ export class LlmServiceClient {
     const payload = safeJsonParse<LlmChatResponse>(response.text);
 
     if (!response.ok) {
-      throw new Error(`llm-service returned ${response.status}`);
+      const bodyPreview =
+        payload && payload.success === false && payload.error?.message
+          ? payload.error.message.slice(0, 300)
+          : response.text.slice(0, 300);
+      throw new Error(`llm-service returned ${response.status}: ${bodyPreview}`);
     }
     if (!payload || payload.success !== true) {
       const errMessage =
@@ -130,22 +140,46 @@ export class LlmServiceClient {
     const timestamp = Date.now().toString();
     const signature = signRequest(this.config.hmacSecret, method, path, bodyString, timestamp);
     const endpoint = `${this.config.baseUrl.replace(/\/$/, '')}${path}`;
-    const response = await fetch(endpoint, {
-      method,
-      headers: {
-        'content-type': 'application/json',
-        'x-timestamp': timestamp,
-        'x-signature': signature,
-      },
-      ...(body ? { body: bodyString } : {}),
-    });
 
-    return {
-      ok: response.ok,
-      status: response.status,
-      text: await response.text(),
-    };
+    const timeoutMs = this.config.requestTimeoutMs ?? 120_000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(endpoint, {
+        method,
+        signal: controller.signal,
+        headers: {
+          'content-type': 'application/json',
+          'x-timestamp': timestamp,
+          'x-signature': signature,
+        },
+        ...(body ? { body: bodyString } : {}),
+      });
+
+      const text = await response.text();
+      return { ok: response.ok, status: response.status, text };
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
+}
+
+/** Retry only on timeout, 429, 5xx, or network errors. Do not retry on 4xx (except 429). */
+function isRetryablePlannerError(error: unknown): boolean {
+  const name = error instanceof Error ? (error as Error & { name?: string }).name : '';
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (name === 'AbortError' || message.includes('abort') || message.includes('timed out') || message.includes('timeout')) {
+    return true;
+  }
+  if (message.includes('429') || message.includes('502') || message.includes('503')) {
+    return true;
+  }
+  if (message.includes('ECONNRESET') || message.includes('ENOTFOUND') || message.includes('ETIMEDOUT') || message.includes('ECONNREFUSED')) {
+    return true;
+  }
+  return false;
 }
 
 function signRequest(

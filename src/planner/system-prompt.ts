@@ -19,10 +19,11 @@ Planning rules:
 3. Prefer "pyth" or "chainlink" for market price checks.
 4. For cross-chain swap intents, prefer "lifi" as swap block.
 5. End notification-style workflows with "telegram" when user expects chat updates.
-6. If user omits essential values (token symbol, chain, threshold, amount), include them in missingInputs.
-7. Purpose must explain each step in one short sentence.
-8. configHints should only contain string placeholders or direct constants useful for compilation.
-9. Use this 2-heading JSON contract:
+6. Use trusted backend context when provided: e.g. if telegramChatId is in context, put it in configHints for telegram steps and do not add it to missingInputs.
+7. If user omits essential values (token symbol, chain, threshold, amount) and they are not in context, include them in missingInputs.
+8. Purpose must explain each step in one short sentence.
+9. configHints should only contain string placeholders or direct constants useful for compilation.
+10. Use this 2-heading JSON contract:
    - heading1_workflow: valid workflow draft (name, description, steps)
    - heading2_notes: operational notes for agent processing (missingInputs, notes)
 

@@ -84,3 +84,23 @@ Then the server exposes `POST /telegram/webhook` and auto-registers the webhook 
 - If planner output has missing fields, the agent can request safe user context from backend (`POST BACKEND_CONTEXT_PATH`).
 - Only allowlisted fields are injected back into the planner prompt (`userAddress`, `privyUserId`, `telegramChatId`, `preferredChains`, `preferredTokens`, `riskProfile`, `slippageBps`).
 - Missing/failed backend context fetch does not break planning; the flow continues without enrichment.
+
+## End-to-end test scenarios
+
+Use these to validate the full path: Telegram → planner → compiler → backend (when configured).
+
+### 1. Price alert workflow
+
+1. Ensure `LLM_SERVICE_BASE_URL` and `LLM_SERVICE_HMAC_SECRET` are set; optionally set `BACKEND_BASE_URL` and `BACKEND_SERVICE_KEY` for execution.
+2. Send a message like: **"Alert me on Telegram when ETH crosses $3000"** (or "when ETH price is below 2800").
+3. Expect: the bot replies with a draft workflow (e.g. Pyth or Chainlink → IF → Telegram), proposed steps, and the line "Reply /confirm to create & run this as a workflow, or edit your request."
+4. If backend is configured: send **/confirm**. Expect: "Workflow created and execution started" with workflow ID and execution ID. Send **/status** to see execution status.
+5. If the plan has missing inputs, the bot lists them; answer or rephrase before using /confirm.
+
+### 2. Simple notification workflow
+
+1. Send: **"Send me a summary on Telegram"** or **"Notify me on Telegram when done"**.
+2. Expect: a short draft (e.g. Start → Telegram) with steps and the /confirm hint.
+3. /confirm creates and runs the workflow; /status reports the latest execution.
+
+These two flows exercise the planner (onchain price + condition vs simple notification), the workflow compiler (START + blocks + edges), and—when backend is set—create/execute/status via the FlowForge API.

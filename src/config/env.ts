@@ -4,6 +4,9 @@ dotenv.config();
 
 export type BotMode = 'polling' | 'webhook';
 
+const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_BACKEND_REQUEST_TIMEOUT_MS = 30_000;
+
 export interface AppEnv {
   port: number;
   mode: BotMode;
@@ -14,6 +17,10 @@ export interface AppEnv {
   llmServiceBaseUrl: string;
   llmServiceHmacSecret: string;
   llmSystemPrompt?: string;
+  /** Request timeout in ms for llm-service calls (planner). */
+  llmRequestTimeoutMs: number;
+  /** Request timeout in ms for backend API calls (workflows, context). */
+  backendRequestTimeoutMs: number;
   backendBaseUrl?: string;
   backendServiceKey?: string;
   backendContextPath: string;
@@ -39,6 +46,15 @@ export function loadEnv(): AppEnv {
     throw new Error(`PORT must be a positive number, got "${rawPort}"`);
   }
 
+  const llmRequestTimeoutMs = parsePositiveInt(
+    process.env.LLM_REQUEST_TIMEOUT_MS,
+    DEFAULT_LLM_REQUEST_TIMEOUT_MS,
+  );
+  const backendRequestTimeoutMs = parsePositiveInt(
+    process.env.BACKEND_REQUEST_TIMEOUT_MS,
+    DEFAULT_BACKEND_REQUEST_TIMEOUT_MS,
+  );
+
   return {
     port,
     mode: parseMode(process.env.TELEGRAM_MODE),
@@ -49,8 +65,17 @@ export function loadEnv(): AppEnv {
     llmServiceBaseUrl: requiredEnv('LLM_SERVICE_BASE_URL'),
     llmServiceHmacSecret: requiredEnv('LLM_SERVICE_HMAC_SECRET'),
     llmSystemPrompt: process.env.LLM_SYSTEM_PROMPT,
+    llmRequestTimeoutMs,
+    backendRequestTimeoutMs,
     backendBaseUrl: process.env.BACKEND_BASE_URL,
     backendServiceKey: process.env.BACKEND_SERVICE_KEY,
     backendContextPath: process.env.BACKEND_CONTEXT_PATH ?? '/api/v1/agent/context',
   };
+}
+
+function parsePositiveInt(value: string | undefined, defaultVal: number): number {
+  if (value === undefined || value === '') return defaultVal;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return defaultVal;
+  return n;
 }

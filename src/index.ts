@@ -12,14 +12,20 @@ async function main() {
     baseUrl: env.llmServiceBaseUrl,
     hmacSecret: env.llmServiceHmacSecret,
     systemPrompt: env.llmSystemPrompt,
+    requestTimeoutMs: env.llmRequestTimeoutMs,
   });
   const backendContextClient = new BackendContextClient({
     baseUrl: env.backendBaseUrl,
     serviceKey: env.backendServiceKey,
     contextPath: env.backendContextPath,
+    requestTimeoutMs: env.backendRequestTimeoutMs,
   });
 
-  registerBotHandlers(bot, server.log, llmClient, backendContextClient);
+  registerBotHandlers(bot, server.log, llmClient, backendContextClient, {
+    backendBaseUrl: env.backendBaseUrl,
+    backendServiceKey: env.backendServiceKey,
+    backendRequestTimeoutMs: env.backendRequestTimeoutMs,
+  });
 
   if (env.mode === 'webhook') {
     registerWebhookRoute(server, bot, env.telegramWebhookPath);

@@ -2,6 +2,8 @@ export interface BackendContextClientConfig {
   baseUrl?: string;
   serviceKey?: string;
   contextPath: string;
+  /** Request timeout in ms. */
+  requestTimeoutMs?: number;
 }
 
 export interface PlannerContextRequest {
@@ -22,48 +24,94 @@ export class BackendContextClient {
       return null;
     }
 
+    const timeoutMs = this.config.requestTimeoutMs ?? 30_000;
+    const endpoint = `${this.config.baseUrl.replace(/\/$/, '')}${this.config.contextPath}`;
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+    };
+
+    if (this.config.serviceKey) {
+      headers['x-service-key'] = this.config.serviceKey;
+      headers['x-on-behalf-of'] = request.userId;
+    }
+
+    const run = async (): Promise<{ context: PlannerContext | null; status?: number; retryable?: boolean }> => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          signal: controller.signal,
+          headers,
+          body: JSON.stringify({
+            userId: request.userId,
+            telegramUserId: request.telegramUserId,
+            chatId: request.chatId,
+            requestedFields: request.requestedFields,
+            prompt: request.prompt,
+          }),
+        });
+
+        const text = await response.text();
+
+        if (!response.ok) {
+          logBackendContextFailure(endpoint, response.status, text);
+          const retryable = response.status >= 500;
+          return { context: null, status: response.status, retryable };
+        }
+
+        const payload = safeJsonParse<{ success?: boolean; data?: unknown }>(text);
+        if (!payload || payload.success !== true || !payload.data || typeof payload.data !== 'object') {
+          return { context: null };
+        }
+
+        const dataRecord = payload.data as Record<string, unknown>;
+        const contextCandidate =
+          dataRecord.context && typeof dataRecord.context === 'object'
+            ? (dataRecord.context as Record<string, unknown>)
+            : dataRecord;
+
+        return { context: sanitizePlannerContext(contextCandidate) };
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
     try {
-      const endpoint = `${this.config.baseUrl.replace(/\/$/, '')}${this.config.contextPath}`;
-      const headers: Record<string, string> = {
-        'content-type': 'application/json',
-      };
-
-      if (this.config.serviceKey) {
-        headers['x-service-key'] = this.config.serviceKey;
-        headers['x-on-behalf-of'] = request.userId;
+      let result = await run();
+      if (result.context != null) return result.context;
+      if (result.retryable === true) {
+        await new Promise((r) => setTimeout(r, 800));
+        result = await run();
       }
-
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          userId: request.userId,
-          telegramUserId: request.telegramUserId,
-          chatId: request.chatId,
-          requestedFields: request.requestedFields,
-          prompt: request.prompt,
-        }),
-      });
-
-      if (!response.ok) {
-        return null;
+      return result.context;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isTimeout = message.includes('abort') || message.includes('timeout');
+      logBackendContextFailure(endpoint, undefined, isTimeout ? 'Request timed out' : message);
+      const networkRetryable = isTimeout || message.includes('ECONNRESET') || message.includes('ENOTFOUND') || message.includes('ETIMEDOUT');
+      if (networkRetryable) {
+        await new Promise((r) => setTimeout(r, 800));
+        try {
+          const retryResult = await run();
+          return retryResult.context;
+        } catch {
+          return null;
+        }
       }
-
-      const payload = safeJsonParse<{ success?: boolean; data?: unknown }>(await response.text());
-      if (!payload || payload.success !== true || !payload.data || typeof payload.data !== 'object') {
-        return null;
-      }
-
-      const dataRecord = payload.data as Record<string, unknown>;
-      const contextCandidate =
-        dataRecord.context && typeof dataRecord.context === 'object'
-          ? (dataRecord.context as Record<string, unknown>)
-          : dataRecord;
-
-      return sanitizePlannerContext(contextCandidate);
-    } catch {
       return null;
     }
+  }
+}
+
+function logBackendContextFailure(endpoint: string, status?: number, bodyOrMessage?: string): void {
+  const preview = typeof bodyOrMessage === 'string' ? bodyOrMessage.slice(0, 200) : '';
+  const msg = `Backend context fetch failed: ${endpoint}${status != null ? ` status=${status}` : ''} ${preview}`.trim();
+  if (status != null && status >= 500) {
+    console.error(msg);
+  } else {
+    console.warn(msg);
   }
 }
 

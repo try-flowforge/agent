@@ -1,13 +1,256 @@
-export interface PlannerStep {
-  blockId: string;
+import { randomUUID } from 'node:crypto';
+import type { PlannerResult, PlannerStep } from '../planner/plan-types';
+import { PLANNER_BLOCKS, VALID_PLANNER_BLOCK_IDS } from '../planner/block-catalog';
+
+export interface CompiledNodePosition {
+  x: number;
+  y: number;
 }
 
-export interface PlannerResult {
-  workflowName: string;
-  steps: PlannerStep[];
+export interface CompiledNode {
+  id: string;
+  type: string;
+  name: string;
+  description?: string;
+  config: Record<string, unknown>;
+  position: CompiledNodePosition;
+  metadata?: Record<string, unknown>;
 }
 
-export function compileWorkflow(_plannerResult: PlannerResult): Record<string, unknown> {
-  // Placeholder scaffold for the next milestone.
-  throw new Error('workflow compiler not implemented yet');
+export interface CompiledEdge {
+  id: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  sourceHandle: string | null;
+  targetHandle: string | null;
+  condition?: Record<string, unknown>;
+  dataMapping?: Record<string, unknown>;
+}
+
+export interface CompiledWorkflow {
+  name: string;
+  description: string;
+  nodes: CompiledNode[];
+  edges: CompiledEdge[];
+  triggerNodeId: string | null;
+  category?: string;
+  tags?: string[];
+  isPublic?: boolean;
+}
+
+export interface CompileWorkflowOptions {
+  /**
+   * Raw planner result from EigenCloud-backed planner.
+   */
+  plan: PlannerResult;
+  /**
+   * Telegram chat ID associated with this workflow (used for Telegram nodes).
+   */
+  chatId?: string;
+  /**
+   * Optional logical category for created workflows.
+   */
+  category?: string;
+  /**
+   * Optional tags to attach to the workflow.
+   */
+  tags?: string[];
+}
+
+export interface CompileWorkflowResult {
+  workflow: CompiledWorkflow;
+  warnings: string[];
+}
+
+const START_NODE_TYPE = 'START';
+const DEFAULT_CATEGORY = 'automation';
+
+export function compilePlannerResultToWorkflow(options: CompileWorkflowOptions): CompileWorkflowResult {
+  const { plan, chatId, category, tags } = options;
+
+  if (!plan.steps || plan.steps.length === 0) {
+    throw new Error('Cannot compile workflow: planner returned no steps.');
+  }
+
+  const warnings: string[] = [];
+
+  const nodes: CompiledNode[] = [];
+  const edges: CompiledEdge[] = [];
+
+  // 1) START node (manual trigger by default)
+  const startNodeId = randomUUID();
+  const startNode: CompiledNode = {
+    id: startNodeId,
+    type: START_NODE_TYPE,
+    name: 'Start',
+    description: 'Manual trigger for this workflow.',
+    config: {
+      triggerType: 'MANUAL',
+    },
+    position: {
+      x: 0,
+      y: 0,
+    },
+    metadata: {},
+  };
+  nodes.push(startNode);
+
+  // 2) One node per planner step
+  const stepNodes: CompiledNode[] = plan.steps.map((step, index) =>
+    compileStepToNode(step, index, chatId, warnings),
+  );
+  nodes.push(...stepNodes);
+
+  // 3) Linear edges: START -> first step -> next ...
+  let previousNodeId: string | null = startNodeId;
+  for (const node of stepNodes) {
+    if (previousNodeId) {
+      const edgeId = `${previousNodeId}->${node.id}`;
+      edges.push({
+        id: edgeId,
+        sourceNodeId: previousNodeId,
+        targetNodeId: node.id,
+        sourceHandle: null,
+        targetHandle: null,
+        condition: {},
+        dataMapping: {},
+      });
+    }
+    previousNodeId = node.id;
+  }
+
+  const workflow: CompiledWorkflow = {
+    name: plan.workflowName || 'Untitled Workflow',
+    description: plan.description || 'Generated from natural language request.',
+    nodes,
+    edges,
+    triggerNodeId: startNodeId,
+    category: category ?? DEFAULT_CATEGORY,
+    tags: tags ?? [],
+    isPublic: false,
+  };
+
+  validateCompiledWorkflow(workflow);
+
+  return { workflow, warnings };
+}
+
+function compileStepToNode(
+  step: PlannerStep,
+  index: number,
+  chatId: string | undefined,
+  warnings: string[],
+): CompiledNode {
+  const { blockId, purpose, configHints } = step;
+
+  if (!VALID_PLANNER_BLOCK_IDS.has(blockId)) {
+    throw new Error(`Unknown planner blockId "${blockId}" in step ${index + 1}.`);
+  }
+
+  const blockDef = PLANNER_BLOCKS.find((block) => block.id === blockId);
+  if (!blockDef) {
+    throw new Error(`No planner block definition found for "${blockId}".`);
+  }
+
+  const nodeId = randomUUID();
+  const baseX = 280;
+  const nodeSpacingX = 260;
+
+  const position: CompiledNodePosition = {
+    x: baseX + index * nodeSpacingX,
+    y: 0,
+  };
+
+  const baseConfig: Record<string, unknown> = buildBaseConfigForBlock(blockDef.backendType, {
+    purpose,
+    configHints,
+    chatId,
+    warnings,
+  });
+
+  return {
+    id: nodeId,
+    type: blockDef.backendType,
+    name: blockDef.label,
+    description: purpose,
+    config: baseConfig,
+    position,
+    metadata: {
+      blockId,
+      plannerLabel: blockDef.label,
+    },
+  };
+}
+
+interface BuildConfigParams {
+  purpose: string;
+  configHints?: Record<string, string>;
+  chatId?: string;
+  warnings: string[];
+}
+
+function buildBaseConfigForBlock(
+  backendType: string,
+  params: BuildConfigParams,
+): Record<string, unknown> {
+  const { purpose, configHints, chatId, warnings } = params;
+
+  const config: Record<string, unknown> = {};
+
+  if (configHints) {
+    for (const [key, value] of Object.entries(configHints)) {
+      config[key] = value;
+    }
+  }
+
+  switch (backendType) {
+    case 'TELEGRAM': {
+      if (!config.message) {
+        config.message = purpose || 'Telegram notification from workflow.';
+      }
+      if (!config.chatId && chatId) {
+        config.chatId = chatId;
+      }
+      if (!config.connectionId) {
+        warnings.push('Telegram block is missing connectionId and will likely fail validation.');
+      }
+      break;
+    }
+    case 'CHAINLINK_PRICE_ORACLE':
+    case 'PYTH_PRICE_ORACLE':
+    case 'PRICE_ORACLE': {
+      if (!config.description) {
+        config.description = purpose;
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  return config;
+}
+
+function validateCompiledWorkflow(workflow: CompiledWorkflow): void {
+  if (!workflow.nodes || workflow.nodes.length === 0) {
+    throw new Error('Compiled workflow has no nodes.');
+  }
+
+  const startNodes = workflow.nodes.filter((node) => node.type === START_NODE_TYPE);
+  if (startNodes.length !== 1) {
+    throw new Error(`Compiled workflow must contain exactly one START node, found ${startNodes.length}.`);
+  }
+
+  if (!workflow.triggerNodeId || !workflow.nodes.some((node) => node.id === workflow.triggerNodeId)) {
+    throw new Error('Compiled workflow is missing a valid triggerNodeId.');
+  }
+
+  const nonStartNodes = workflow.nodes.filter((node) => node.type !== START_NODE_TYPE);
+  if (nonStartNodes.length === 0) {
+    throw new Error('Compiled workflow must contain at least one non-START node.');
+  }
+
+  if (!workflow.edges || workflow.edges.length < nonStartNodes.length) {
+    throw new Error('Compiled workflow edges do not connect all nodes linearly.');
+  }
 }
