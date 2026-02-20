@@ -33,12 +33,12 @@ export function registerTextMessageHandler(
   const workflowClient =
     backendConfig?.backendBaseUrl != null && backendConfig.backendBaseUrl !== ''
       ? new WorkflowClient({
-          baseUrl: backendConfig.backendBaseUrl,
-          serviceKey: backendConfig.backendServiceKey,
-          contextPath: '',
-          workflowsPath: '/api/v1/workflows',
-          requestTimeoutMs: backendConfig.backendRequestTimeoutMs ?? 30_000,
-        })
+        baseUrl: backendConfig.backendBaseUrl,
+        serviceKey: backendConfig.backendServiceKey,
+        contextPath: '',
+        workflowsPath: '/api/v1/workflows',
+        requestTimeoutMs: backendConfig.backendRequestTimeoutMs ?? 30_000,
+      })
       : null;
 
   bot.on('message:text', async (ctx) => {
@@ -230,7 +230,40 @@ export function registerTextMessageHandler(
         'Planner result received',
       );
 
-      await replyInChunks(ctx, formatPlannerReply(plannerResult));
+      // Detect if we need an on-chain action (swap, supply, borrow)
+      const onChainBlocks = ['uniswap', 'lifi', 'lending']; // based on alias map in planner-client
+      const hasOnChainAction = plannerResult.steps.some(step => onChainBlocks.includes(step.blockId));
+
+      let replyText = formatPlannerReply(plannerResult);
+
+      if (hasOnChainAction) {
+        if (plannerResult.missingInputs.length === 0) {
+          const swapStep = plannerResult.steps.find(step => onChainBlocks.includes(step.blockId));
+          const hints = swapStep?.configHints || {};
+
+          logger.info({ chatId, blockId: swapStep?.blockId }, 'Creating transaction intent for on-chain action');
+
+          const intentData = await backendContextClient.createTransactionIntent({
+            userId: agentUserId,
+            agentUserId: agentUserId,
+            safeAddress: '0x0000000000000000000000000000000000000000', // We will resolve the real safe address on the frontend during signing
+            chainId: hints.chain || 'ARBITRUM',
+            to: hints.destinationToken || '0x',
+            value: hints.amount || '0',
+            data: '0x',
+            description: plannerResult.description,
+          });
+
+          if (intentData) {
+            const magicLink = `https://flowforge.app/agent-onboarding?intentId=${intentData.id}`;
+            replyText += `\n\n🔗 *Action Required:*\nI've prepared a transaction for this. Please review and sign it here:\n[Sign Transaction](${magicLink})`;
+          } else {
+            replyText += `\n\n⚠️ Could not prepare a transaction intent. Please try again.`;
+          }
+        }
+      }
+
+      await replyInChunks(ctx, replyText);
 
       const existingSession = sessions.get(chatId);
       sessions.set(chatId, {

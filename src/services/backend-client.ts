@@ -16,8 +16,26 @@ export interface PlannerContextRequest {
 
 export type PlannerContext = Record<string, string | number | boolean | string[]>;
 
+export interface CreateIntentRequest {
+  userId: string;
+  agentUserId: string;
+  safeAddress: string;
+  chainId: string;
+  to: string;
+  value: string;
+  data: string;
+  description?: string;
+}
+
+export interface TransactionIntentResponse {
+  id: string;
+  userId: string;
+  status: string;
+  txHash?: string;
+}
+
 export class BackendContextClient {
-  constructor(private readonly config: BackendContextClientConfig) {}
+  constructor(private readonly config: BackendContextClientConfig) { }
 
   async fetchPlannerContext(request: PlannerContextRequest): Promise<PlannerContext | null> {
     if (!this.config.baseUrl) {
@@ -103,7 +121,50 @@ export class BackendContextClient {
       return null;
     }
   }
+
+  async createTransactionIntent(request: CreateIntentRequest): Promise<TransactionIntentResponse | null> {
+    if (!this.config.baseUrl) {
+      return null;
+    }
+
+    try {
+      // Assuming the intents API is mounted at /api/v1/intents
+      const endpoint = `${this.config.baseUrl.replace(/\/$/, '')}/api/v1/intents`;
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+      };
+
+      if (this.config.serviceKey) {
+        headers['x-service-key'] = this.config.serviceKey;
+        // Even though intents have verifyPrivyToken, for server-to-server we might need a bypass
+        // or the agent needs to act on behalf. Let's send the headers.
+        headers['x-on-behalf-of'] = request.userId;
+      }
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(request),
+      });
+
+      if (!response.ok) {
+        console.error(`Failed to create intent: ${response.status} ${await response.text()}`);
+        return null;
+      }
+
+      const payload = safeJsonParse<{ success?: boolean; data?: TransactionIntentResponse }>(await response.text());
+      if (!payload || payload.success !== true || !payload.data) {
+        return null;
+      }
+
+      return payload.data;
+    } catch (e) {
+      console.error('Error creating transaction intent', e);
+      return null;
+    }
+  }
 }
+
 
 function logBackendContextFailure(endpoint: string, status?: number, bodyOrMessage?: string): void {
   const preview = typeof bodyOrMessage === 'string' ? bodyOrMessage.slice(0, 200) : '';
