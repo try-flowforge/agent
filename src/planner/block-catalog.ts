@@ -7,6 +7,13 @@ export interface PlannerBlockDefinition {
 
 export const PLANNER_BLOCKS: PlannerBlockDefinition[] = [
   { id: 'api', backendType: 'API', label: 'HTTP Request', description: 'Make HTTP calls to external APIs.' },
+  {
+    id: 'time-block',
+    backendType: 'TIME_BLOCK',
+    label: 'Scheduled Trigger',
+    description:
+      'Run workflow on a schedule (one-time, interval, or cron). Use for delayed or recurring workflows.',
+  },
   { id: 'telegram', backendType: 'TELEGRAM', label: 'Telegram', description: 'Send message updates to Telegram chat.' },
   { id: 'slack', backendType: 'SLACK', label: 'Slack', description: 'Send a message to Slack.' },
   { id: 'mail', backendType: 'EMAIL', label: 'Email', description: 'Send email notification.' },

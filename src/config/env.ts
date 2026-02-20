@@ -24,6 +24,7 @@ export interface AppEnv {
   backendBaseUrl?: string;
   backendServiceKey?: string;
   backendContextPath: string;
+  frontendBaseUrl: string;
 }
 
 function requiredEnv(name: string): string {
@@ -70,6 +71,7 @@ export function loadEnv(): AppEnv {
     backendBaseUrl: process.env.BACKEND_BASE_URL,
     backendServiceKey: process.env.BACKEND_SERVICE_KEY,
     backendContextPath: process.env.BACKEND_CONTEXT_PATH ?? '/api/v1/agent/context',
+    frontendBaseUrl: process.env.FRONTEND_BASE_URL ?? 'https://flowforge.app',
   };
 }
 

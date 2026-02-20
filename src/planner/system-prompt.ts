@@ -14,7 +14,7 @@ Available blocks (use exact blockId values):
 ${blockList}
 
 Planning rules:
-1. Do not include Start trigger in steps; compiler adds START (MANUAL) automatically.
+1. For non-scheduled workflows, do not include Start trigger in steps; compiler adds START (MANUAL) automatically.
 2. Keep steps linear unless branching is required; use "if" only for explicit conditions.
 3. Prefer "pyth" or "chainlink" for market price checks.
 4. For cross-chain swap intents, prefer "lifi" as swap block.
@@ -26,6 +26,10 @@ Planning rules:
 10. Use this 2-heading JSON contract:
    - heading1_workflow: valid workflow draft (name, description, steps)
    - heading2_notes: operational notes for agent processing (missingInputs, notes)
+11. For requests with time-based conditions ("when price drops below X", "every hour check Y"), use "time-block" as the FIRST step, followed by an oracle/API check, then an "if" condition, then the action, then notification.
+12. For "time-block" configHints, include intervalSeconds (default "300" for price checks) and durationSeconds (default "86400" = 24h) unless user specifies otherwise.
+13. Do NOT add scheduling details as missingInputs when reasonable defaults can be inferred from request intent.
+14. For prompts like "swap when ETH price < X", prefer this shape: time-block -> chainlink/pyth -> if -> swap -> telegram.
 
 Required output format:
 {

@@ -25,6 +25,7 @@ async function main() {
     backendBaseUrl: env.backendBaseUrl,
     backendServiceKey: env.backendServiceKey,
     backendRequestTimeoutMs: env.backendRequestTimeoutMs,
+    frontendBaseUrl: env.frontendBaseUrl,
   });
 
   if (env.mode === 'webhook') {

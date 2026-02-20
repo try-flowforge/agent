@@ -6,7 +6,7 @@ import type { BackendContextClient } from '../services/backend-client';
 import type { LlmServiceClient } from '../services/planner-client';
 import type { TextHandlerBackendConfig } from './handlers/text-message';
 
-type BotLogger = Pick<FastifyBaseLogger, 'info' | 'error'>;
+type BotLogger = Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
 
 export function createTelegramBot(token: string): Bot {
   return new Bot(token);

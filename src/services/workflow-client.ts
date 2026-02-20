@@ -46,9 +46,31 @@ export interface ExecuteWorkflowResponse {
 
 export interface WorkflowExecutionStatus {
   id: string;
+  workflow_id?: string;
+  user_id?: string;
   status: string;
-  startedAt?: string;
-  finishedAt?: string;
+  started_at?: string;
+  finished_at?: string;
+  safe_tx_hash?: string;
+  paused_at_node_id?: string;
+  error?: { message?: string; code?: string; details?: unknown };
+  nodeExecutions?: Array<{
+    id: string;
+    node_id: string;
+    status: string;
+    started_at?: string;
+    finished_at?: string;
+    output_data?: unknown;
+    error_message?: string;
+  }>;
+}
+
+export interface TimeBlockResponse {
+  id: string;
+  workflow_id?: string;
+  user_id?: string;
+  status?: string;
+  run_at?: string;
 }
 
 export class WorkflowClient {
@@ -185,6 +207,87 @@ export class WorkflowClient {
     }
 
     return payload.data;
+  }
+
+  async listExecutions(userId: string, workflowId: string): Promise<WorkflowExecutionStatus[]> {
+    if (!this.baseUrl) {
+      throw new Error('Backend base URL is not configured for WorkflowClient.');
+    }
+
+    const endpoint = `${this.baseUrl.replace(/\/$/, '')}${this.config.workflowsPath}/${workflowId}/executions`;
+    const { ok, status, text } = await this.fetchWithTimeout(endpoint, {
+      method: 'GET',
+      headers: this.buildHeaders(userId),
+    });
+
+    if (!ok) {
+      throw new Error(`Failed to list workflow executions: ${status} ${text}`);
+    }
+
+    const payload = safeJsonParse<{ success?: boolean; data?: WorkflowExecutionStatus[] }>(text);
+    if (!payload || payload.success !== true || !Array.isArray(payload.data)) {
+      throw new Error('Backend response for list executions is invalid.');
+    }
+
+    return payload.data;
+  }
+
+  async createTimeBlock(
+    userId: string,
+    body: {
+      workflowId: string;
+      runAt: string;
+      recurrence?: {
+        type: 'INTERVAL' | 'CRON' | 'NONE';
+        intervalSeconds?: number;
+        cronExpression?: string;
+        untilAt?: string;
+      };
+    },
+  ): Promise<TimeBlockResponse> {
+    if (!this.baseUrl) {
+      throw new Error('Backend base URL is not configured for WorkflowClient.');
+    }
+
+    const endpoint = `${this.baseUrl.replace(/\/$/, '')}/api/v1/time-blocks`;
+    const { ok, status, text } = await this.fetchWithTimeout(endpoint, {
+      method: 'POST',
+      headers: this.buildHeaders(userId),
+      body: JSON.stringify(body),
+    });
+
+    if (!ok) {
+      throw new Error(`Failed to create time block: ${status} ${text}`);
+    }
+
+    const payload = safeJsonParse<{ success?: boolean; data?: TimeBlockResponse }>(text);
+    if (!payload || payload.success !== true || !payload.data?.id) {
+      throw new Error('Backend response for create time block is invalid.');
+    }
+
+    return payload.data;
+  }
+
+  async cancelTimeBlock(userId: string, timeBlockId: string): Promise<void> {
+    if (!this.baseUrl) {
+      throw new Error('Backend base URL is not configured for WorkflowClient.');
+    }
+
+    const endpoint = `${this.baseUrl.replace(/\/$/, '')}/api/v1/time-blocks/${timeBlockId}/cancel`;
+    const { ok, status, text } = await this.fetchWithTimeout(endpoint, {
+      method: 'POST',
+      headers: this.buildHeaders(userId),
+      body: JSON.stringify({}),
+    });
+
+    if (!ok) {
+      throw new Error(`Failed to cancel time block: ${status} ${text}`);
+    }
+
+    const payload = safeJsonParse<{ success?: boolean }>(text);
+    if (!payload || payload.success !== true) {
+      throw new Error('Backend response for cancel time block is invalid.');
+    }
   }
 }
 

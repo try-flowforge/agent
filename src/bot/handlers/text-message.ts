@@ -5,13 +5,15 @@ import type { LlmServiceClient } from '../../services/planner-client';
 import type { PlannerResult } from '../../planner/plan-types';
 import { compilePlannerResultToWorkflow } from '../../services/workflow-compiler';
 import { WorkflowClient } from '../../services/workflow-client';
+import { monitorScheduledWorkflow, monitorSingleExecution } from '../../services/execution-monitor';
 
-type BotLogger = Pick<FastifyBaseLogger, 'info' | 'error'>;
+type BotLogger = Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
 
 export interface TextHandlerBackendConfig {
   backendBaseUrl?: string;
   backendServiceKey?: string;
   backendRequestTimeoutMs?: number;
+  frontendBaseUrl?: string;
 }
 
 export function registerTextMessageHandler(
@@ -26,6 +28,7 @@ export function registerTextMessageHandler(
     lastPlan?: PlannerResult;
     lastWorkflowId?: string;
     lastExecutionId?: string;
+    lastTimeBlockId?: string;
   };
 
   const sessions = new Map<number, Session>();
@@ -40,6 +43,8 @@ export function registerTextMessageHandler(
         requestTimeoutMs: backendConfig.backendRequestTimeoutMs ?? 30_000,
       })
       : null;
+
+  const frontendBaseUrl = backendConfig?.frontendBaseUrl || 'https://flowforge.app';
 
   bot.on('message:text', async (ctx) => {
     const chatId = ctx.chat.id;
@@ -74,7 +79,7 @@ export function registerTextMessageHandler(
             'Compiling and executing confirmed workflow',
           );
 
-          const { workflow } = compilePlannerResultToWorkflow({
+          const { workflow, schedule } = compilePlannerResultToWorkflow({
             plan: session.lastPlan,
             chatId: String(chatId),
           });
@@ -92,25 +97,83 @@ export function registerTextMessageHandler(
 
           logger.info({ chatId, userId, workflowId: created.id }, 'Workflow created');
 
-          const executed = await workflowClient.executeWorkflow(session.userId, created.id);
+          if (schedule) {
+            const now = new Date();
+            const untilAt = new Date(now.getTime() + schedule.durationSeconds * 1000);
+            const timeBlock = await workflowClient.createTimeBlock(session.userId, {
+              workflowId: created.id,
+              runAt: now.toISOString(),
+              recurrence: {
+                type: 'INTERVAL',
+                intervalSeconds: schedule.intervalSeconds,
+                untilAt: untilAt.toISOString(),
+              },
+            });
 
-          logger.info({ chatId, userId, workflowId: created.id, executionId: executed.executionId }, 'Workflow execution started');
+            sessions.set(chatId, {
+              ...session,
+              lastWorkflowId: created.id,
+              lastTimeBlockId: timeBlock.id,
+            });
 
-          sessions.set(chatId, {
-            ...session,
-            lastWorkflowId: created.id,
-            lastExecutionId: executed.executionId,
-          });
+            void monitorScheduledWorkflow({
+              bot,
+              chatId,
+              userId: session.userId,
+              workflowId: created.id,
+              timeBlockId: timeBlock.id,
+              durationSeconds: schedule.durationSeconds,
+              workflowClient,
+              signingBaseUrl: frontendBaseUrl,
+              logger,
+            }).catch((error) => {
+              logger.error(
+                {
+                  chatId,
+                  workflowId: created.id,
+                  errorMessage: error instanceof Error ? error.message : String(error),
+                },
+                'Scheduled workflow monitor crashed',
+              );
+            });
 
-          await ctx.reply(
-            [
-              'Workflow created and execution started.',
-              `Workflow ID: ${created.id}`,
-              `Execution ID: ${executed.executionId}`,
-              `Status: ${executed.status} - ${executed.message}`,
-              'Use /status to check the latest execution status.',
-            ].join('\n'),
-          );
+            await ctx.reply(
+              `Workflow created and scheduled. I'll check every ${Math.round(schedule.intervalSeconds / 60)} minutes for the next ${Math.round(schedule.durationSeconds / 3600)} hours and notify you here when action is needed.`,
+            );
+          } else {
+            const executed = await workflowClient.executeWorkflow(session.userId, created.id);
+
+            logger.info({ chatId, userId, workflowId: created.id, executionId: executed.executionId }, 'Workflow execution started');
+
+            sessions.set(chatId, {
+              ...session,
+              lastWorkflowId: created.id,
+              lastExecutionId: executed.executionId,
+            });
+
+            void monitorSingleExecution({
+              bot,
+              chatId,
+              userId: session.userId,
+              executionId: executed.executionId,
+              workflowClient,
+              signingBaseUrl: frontendBaseUrl,
+              logger,
+            }).catch((error) => {
+              logger.error(
+                {
+                  chatId,
+                  executionId: executed.executionId,
+                  errorMessage: error instanceof Error ? error.message : String(error),
+                },
+                'Single execution monitor crashed',
+              );
+            });
+
+            await ctx.reply(
+              'Workflow created and running. I will notify you here when it completes or needs your signature.',
+            );
+          }
         } catch (error) {
           const message = translateWorkflowError(error);
           logger.error(
@@ -144,8 +207,8 @@ export function registerTextMessageHandler(
           await ctx.reply(
             [
               `Execution ${status.id}: ${status.status}`,
-              status.startedAt ? `Started: ${status.startedAt}` : '',
-              status.finishedAt ? `Finished: ${status.finishedAt}` : '',
+              status.started_at ? `Started: ${status.started_at}` : '',
+              status.finished_at ? `Finished: ${status.finished_at}` : '',
             ]
               .filter(Boolean)
               .join('\n'),
@@ -230,58 +293,7 @@ export function registerTextMessageHandler(
         'Planner result received',
       );
 
-      // Detect if we need an on-chain action (swap, supply, borrow)
-      const onChainBlockIds = ['uniswap', 'lifi', 'lending']; // based on alias map in planner-client
-      const onChainSteps = plannerResult.steps.filter(step => onChainBlockIds.includes(step.blockId));
-      const hasOnChainAction = onChainSteps.length > 0;
-
-      let replyText = formatPlannerReply(plannerResult);
-
-      if (hasOnChainAction && plannerResult.missingInputs.length === 0) {
-        logger.info({ chatId, stepCount: onChainSteps.length }, 'Building transaction intent for on-chain action(s)');
-
-        // Determine the chain and numeric chain ID from the first step's hints
-        const firstHints = onChainSteps[0]?.configHints || {};
-        const chainStr = (firstHints.chain as string) || 'ARBITRUM';
-        const chainIdMap: Record<string, number> = {
-          ARBITRUM: 42161, ARBITRUM_SEPOLIA: 421614,
-          BASE: 8453, ETHEREUM: 1, ETHEREUM_SEPOLIA: 11155111,
-        };
-        const chainId = chainIdMap[chainStr] ?? 42161;
-
-        // Resolve the user's Safe address from their planner context
-        const plannerContext = await backendContextClient.fetchPlannerContext({
-          userId: agentUserId,
-          chatId: String(chatId),
-          requestedFields: ['safeAddress'],
-          prompt: '',
-        });
-        const safeAddress = (plannerContext?.safeAddress as string) || '0x0000000000000000000000000000000000000000';
-
-        // Map planner steps to BuildIntentStep format
-        const steps = onChainSteps.map(step => ({
-          blockType: (step.blockId === 'lending' ? 'lending' : 'swap') as 'swap' | 'lending',
-          configHints: step.configHints as Record<string, string | number>,
-        }));
-
-        const intentData = await backendContextClient.buildTransactionIntent({
-          userId: agentUserId,
-          agentUserId,
-          safeAddress,
-          chainId,
-          description: plannerResult.description,
-          steps,
-        });
-
-        if (intentData) {
-          const magicLink = `https://flowforge.app/agent-onboarding?intentId=${intentData.id}`;
-          replyText += `\n\n🔗 *Action Required:*\nI've prepared a transaction for this. Please review and sign it here:\n[Sign Transaction](${magicLink})`;
-        } else {
-          replyText += `\n\n⚠️ Could not prepare a transaction. Please try again.`;
-        }
-      }
-
-      await replyInChunks(ctx, replyText);
+      await replyInChunks(ctx, formatPlannerReply(plannerResult));
 
       const existingSession = sessions.get(chatId);
       sessions.set(chatId, {
