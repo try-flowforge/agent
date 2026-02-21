@@ -47,10 +47,15 @@ const DEFAULT_TEMPERATURE = 0;
 const MAX_RETRIES_PER_MODEL = 2;
 const RETRY_BASE_DELAY_MS = 1200;
 const HARD_CODED_MODEL: LlmModelDefinition = {
-  id: 'eigencloud-gpt-oss',
-  provider: 'eigencloud',
-  model: 'gpt-oss-120b-f16',
+  id: 'openai-chatgpt',
+  provider: 'openai',
+  model: 'gpt-5-nano',
 };
+// const HARD_CODED_MODEL: LlmModelDefinition = {
+//   id: 'eigencloud-gpt-oss',
+//   provider: 'eigencloud',
+//   model: 'gpt-oss-120b-f16',
+// };
 // const HARD_CODED_MODEL: LlmModelDefinition = {
 //   id: 'eigencloud-qwen3',
 //   provider: 'eigencloud',
