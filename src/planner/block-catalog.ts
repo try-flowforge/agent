@@ -26,6 +26,12 @@ export const PLANNER_BLOCKS: PlannerBlockDefinition[] = [
   { id: 'relay', backendType: 'SWAP', label: 'Relay', description: 'Relay-powered token/tx routing.' },
   { id: 'aave', backendType: 'LENDING', label: 'Aave', description: 'Lending operations with Aave.' },
   { id: 'compound', backendType: 'LENDING', label: 'Compound', description: 'Lending operations with Compound.' },
+  {
+    id: 'ostium',
+    backendType: 'PERPS',
+    label: 'Ostium Perps',
+    description: 'Trade perpetuals and manage positions on Ostium (testnet/mainnet).',
+  },
   { id: 'chainlink', backendType: 'CHAINLINK_PRICE_ORACLE', label: 'Chainlink', description: 'Read price/data from Chainlink feed.' },
   { id: 'pyth', backendType: 'PYTH_PRICE_ORACLE', label: 'Pyth', description: 'Read price/data from Pyth feed.' },
   {

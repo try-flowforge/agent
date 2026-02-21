@@ -30,6 +30,9 @@ Planning rules:
 12. For "time-block" configHints, include intervalSeconds (default "300" for price checks) and durationSeconds (default "86400" = 24h) unless user specifies otherwise.
 13. Do NOT add scheduling details as missingInputs when reasonable defaults can be inferred from request intent.
 14. For prompts like "swap when ETH price < X", prefer this shape: time-block -> chainlink/pyth -> if -> swap -> telegram.
+15. For Ostium intents, use blockId "ostium" and include configHints.action with one of: MARKETS, PRICE, BALANCE, LIST_POSITIONS, OPEN_POSITION, CLOSE_POSITION, UPDATE_SL, UPDATE_TP.
+16. For Ostium write actions (OPEN_POSITION, CLOSE_POSITION, UPDATE_SL, UPDATE_TP), include required configHints (e.g., market/side/collateral/leverage or pairId/tradeIndex/slPrice/tpPrice); if unknown, add to missingInputs.
+17. For Ostium configHints.network, use "testnet" by default unless user explicitly asks for mainnet.
 
 Required output format:
 {

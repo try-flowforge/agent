@@ -71,6 +71,16 @@ const TIME_BLOCK_NODE_TYPE = 'TIME_BLOCK';
 const DEFAULT_CATEGORY = 'automation';
 const DEFAULT_INTERVAL_SECONDS = 300;
 const DEFAULT_DURATION_SECONDS = 86_400;
+const PERPS_ACTIONS = new Set([
+  'MARKETS',
+  'PRICE',
+  'BALANCE',
+  'LIST_POSITIONS',
+  'OPEN_POSITION',
+  'CLOSE_POSITION',
+  'UPDATE_SL',
+  'UPDATE_TP',
+]);
 
 export function compilePlannerResultToWorkflow(options: CompileWorkflowOptions): CompileWorkflowResult {
   const { plan, chatId, category, tags } = options;
@@ -341,11 +351,126 @@ function buildBaseConfigForBlock(
       }
       break;
     }
+    case 'PERPS': {
+      normalizePerpsConfig(config, warnings);
+      break;
+    }
     default:
       break;
   }
 
   return config;
+}
+
+function normalizePerpsConfig(config: Record<string, unknown>, warnings: string[]): void {
+  config.provider = 'OSTIUM';
+
+  const rawNetwork = String(config.network ?? '').trim().toLowerCase();
+  if (rawNetwork === 'mainnet' || rawNetwork === 'testnet') {
+    config.network = rawNetwork;
+  } else {
+    config.network = 'testnet';
+    if (rawNetwork) {
+      warnings.push(`Invalid Ostium network "${rawNetwork}", defaulting to testnet.`);
+    }
+  }
+
+  const rawAction = String(config.action ?? '').trim().toUpperCase();
+  if (PERPS_ACTIONS.has(rawAction)) {
+    config.action = rawAction;
+  } else {
+    config.action = 'MARKETS';
+    if (rawAction) {
+      warnings.push(`Invalid Ostium action "${rawAction}", defaulting to MARKETS.`);
+    }
+  }
+
+  const market = asNonEmptyString(config.market);
+  const base = asNonEmptyString(config.base);
+  const quote = asNonEmptyString(config.quote);
+  const address = asNonEmptyString(config.address);
+  const traderAddress = asNonEmptyString(config.traderAddress);
+  const side = asNonEmptyString(config.side)?.toLowerCase();
+  const idempotencyKey = asNonEmptyString(config.idempotencyKey);
+
+  if (market) config.market = market;
+  if (base) config.base = base.toUpperCase();
+  if (quote) config.quote = quote.toUpperCase();
+  if (address) config.address = address;
+  if (traderAddress) config.traderAddress = traderAddress;
+  if (idempotencyKey) config.idempotencyKey = idempotencyKey;
+
+  if (side === 'long' || side === 'short') {
+    config.side = side;
+  } else if (config.action === 'OPEN_POSITION') {
+    warnings.push('Ostium OPEN_POSITION missing side (expected "long" or "short").');
+  }
+
+  setOptionalNumber(config, 'collateral');
+  setOptionalNumber(config, 'leverage');
+  setOptionalInteger(config, 'pairId');
+  setOptionalInteger(config, 'tradeIndex');
+  setOptionalNumber(config, 'slPrice');
+  setOptionalNumber(config, 'tpPrice');
+
+  // Action-specific warning hints to drive clarification if model omitted required fields.
+  if (config.action === 'PRICE' && !config.base && !config.market) {
+    warnings.push('Ostium PRICE missing base/market in configHints.');
+  }
+  if (config.action === 'OPEN_POSITION') {
+    if (!config.market) warnings.push('Ostium OPEN_POSITION missing market.');
+    if (config.collateral == null) warnings.push('Ostium OPEN_POSITION missing collateral.');
+    if (config.leverage == null) warnings.push('Ostium OPEN_POSITION missing leverage.');
+  }
+  if (config.action === 'CLOSE_POSITION' || config.action === 'UPDATE_SL' || config.action === 'UPDATE_TP') {
+    if (config.pairId == null) warnings.push(`Ostium ${String(config.action)} missing pairId.`);
+    if (config.tradeIndex == null) warnings.push(`Ostium ${String(config.action)} missing tradeIndex.`);
+  }
+  if (config.action === 'UPDATE_SL' && config.slPrice == null) {
+    warnings.push('Ostium UPDATE_SL missing slPrice.');
+  }
+  if (config.action === 'UPDATE_TP' && config.tpPrice == null) {
+    warnings.push('Ostium UPDATE_TP missing tpPrice.');
+  }
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function toNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function setOptionalNumber(config: Record<string, unknown>, key: string): void {
+  const parsed = toNumber(config[key]);
+  if (parsed !== undefined) {
+    config[key] = parsed;
+  } else {
+    delete config[key];
+  }
+}
+
+function setOptionalInteger(config: Record<string, unknown>, key: string): void {
+  const parsed = toNumber(config[key]);
+  if (parsed !== undefined) {
+    config[key] = Math.trunc(parsed);
+  } else {
+    delete config[key];
+  }
 }
 
 function validateCompiledWorkflow(workflow: CompiledWorkflow): void {
