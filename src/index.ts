@@ -52,6 +52,12 @@ async function main() {
   }
 
   if (env.mode === 'polling') {
+    try {
+      await bot.api.deleteWebhook({ drop_pending_updates: false });
+      server.log.info('Cleared any existing Telegram webhook so polling can receive updates');
+    } catch (err) {
+      server.log.warn({ err }, 'deleteWebhook failed (non-fatal)');
+    }
     server.log.info('Starting Telegram bot in long polling mode');
     await bot.start({
       drop_pending_updates: true,

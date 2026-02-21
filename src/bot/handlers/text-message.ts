@@ -53,6 +53,38 @@ export function registerTextMessageHandler(
 
     logger.info({ chatId, userId, text }, 'Telegram message received');
 
+    const trimmed = text.trim().toLowerCase();
+    if (trimmed.startsWith('verify-') && backendConfig?.backendBaseUrl && backendConfig?.backendServiceKey) {
+      const code = text.trim();
+      const chatTitle =
+        ctx.chat.title ?? ctx.chat.first_name ?? ctx.chat.username ?? 'Unknown';
+      const chatType = ctx.chat.type ?? 'private';
+      try {
+        const baseUrl = backendConfig.backendBaseUrl.replace(/\/$/, '');
+        const res = await fetch(`${baseUrl}/api/v1/integrations/telegram/verification/verify-from-agent`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-service-key': backendConfig.backendServiceKey,
+          },
+          body: JSON.stringify({
+            code,
+            chatId: String(chatId),
+            chatTitle,
+            chatType,
+          }),
+          signal: AbortSignal.timeout(backendConfig.backendRequestTimeoutMs ?? 30_000),
+        });
+        const data = (await res.json()) as { success?: boolean; message?: string };
+        const message = typeof data.message === 'string' ? data.message : (data.success ? 'Verified.' : 'Verification failed.');
+        await ctx.reply(message, { parse_mode: 'Markdown' });
+      } catch (err) {
+        logger.warn({ chatId, err }, 'verify-from-agent request failed');
+        await ctx.reply('Verification request failed. Please try again later.');
+      }
+      return;
+    }
+
     if (text.startsWith('/')) {
       if (text === '/confirm') {
         if (!workflowClient) {
