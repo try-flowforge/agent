@@ -81,6 +81,41 @@ const CHAINLINK_ETH_USD_AGGREGATORS: Record<string, string> = {
   ETHEREUM: '0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419',
 };
 
+/** Common token addresses by chain (symbol uppercase). Used to build SWAP inputConfig from planner symbols. */
+const COMMON_TOKENS_BY_CHAIN: Record<
+  string,
+  Record<string, { address: string; symbol: string; decimals: number }>
+> = {
+  ARBITRUM_SEPOLIA: {
+    WETH: { address: '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73', symbol: 'WETH', decimals: 18 },
+    USDC: { address: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', symbol: 'USDC', decimals: 6 },
+  },
+  ETHEREUM_SEPOLIA: {
+    WETH: { address: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', symbol: 'WETH', decimals: 18 },
+    USDC: { address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', symbol: 'USDC', decimals: 6 },
+  },
+  UNICHAIN_SEPOLIA: {
+    WETH: { address: '0x4200000000000000000000000000000000000006', symbol: 'WETH', decimals: 18 },
+    USDC: { address: '0x31d0220469e10c4e71834a79b1f276d740d3768f', symbol: 'USDC', decimals: 6 },
+  },
+  ARBITRUM: {
+    WETH: { address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', symbol: 'WETH', decimals: 18 },
+    USDC: { address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', symbol: 'USDC', decimals: 6 },
+  },
+  ETHEREUM: {
+    WETH: { address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', symbol: 'WETH', decimals: 18 },
+    USDC: { address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', symbol: 'USDC', decimals: 6 },
+  },
+  UNICHAIN: {
+    WETH: { address: '0x4200000000000000000000000000000000000006', symbol: 'WETH', decimals: 18 },
+    USDC: { address: '0x078d782b760474a361dda0af3839290b0ef57ad6', symbol: 'USDC', decimals: 6 },
+  },
+  BASE: {
+    WETH: { address: '0x4200000000000000000000000000000000000006', symbol: 'WETH', decimals: 18 },
+    USDC: { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6 },
+  },
+};
+
 export function compilePlannerResultToWorkflow(options: CompileWorkflowOptions): CompileWorkflowResult {
   const { plan, chatId, category, tags, telegramConnectionId } = options;
 
@@ -238,6 +273,16 @@ function extractScheduleFromTimeBlockStep(
   };
 }
 
+/** Convert human amount (e.g. "10") to wei/smallest unit string for given decimals. */
+function toWeiString(amountHuman: string, decimals: number): string {
+  const n = parseFloat(amountHuman);
+  if (!Number.isFinite(n) || n < 0) return '0';
+  const s = n.toFixed(decimals);
+  const [head, tail] = s.split('.');
+  const frac = (tail ?? '').padEnd(decimals, '0').slice(0, decimals);
+  return (head === '0' ? '' : head) + frac;
+}
+
 function toPositiveInt(
   rawValue: unknown,
   defaultValue: number,
@@ -333,6 +378,50 @@ function buildBaseConfigForBlock(
   }
 
   switch (backendType) {
+    case 'SWAP': {
+      const chain = normalizeChain(config.chain);
+      config.chain = chain;
+      const providerRaw = config.provider ?? 'UNISWAP_V4';
+      config.provider =
+        typeof providerRaw === 'string' && /^[A-Z_0-9]+$/.test(providerRaw)
+          ? providerRaw
+          : 'UNISWAP_V4';
+      const tokens = COMMON_TOKENS_BY_CHAIN[chain];
+      const fromSymbol = String(config.fromToken ?? config.sourceToken ?? '')
+        .trim()
+        .toUpperCase();
+      const toSymbol = String(config.toToken ?? config.destinationToken ?? '')
+        .trim()
+        .toUpperCase();
+      const amountHuman = String(config.amount ?? '0').trim();
+      const sourceToken = tokens?.[fromSymbol]
+        ? { address: tokens[fromSymbol].address, symbol: tokens[fromSymbol].symbol, decimals: tokens[fromSymbol].decimals }
+        : { address: (config.sourceToken as any)?.address ?? '0x0000000000000000000000000000000000000000', symbol: fromSymbol || '', decimals: 18 };
+      const destinationToken = tokens?.[toSymbol]
+        ? { address: tokens[toSymbol].address, symbol: tokens[toSymbol].symbol, decimals: tokens[toSymbol].decimals }
+        : { address: (config.destinationToken as any)?.address ?? '0x0000000000000000000000000000000000000000', symbol: toSymbol || '', decimals: 18 };
+      const amountWei = toWeiString(amountHuman, sourceToken.decimals);
+      config.inputConfig = {
+        sourceToken,
+        destinationToken,
+        amount: amountWei,
+        swapType: (config.swapType as string) === 'EXACT_OUTPUT' ? 'EXACT_OUTPUT' : 'EXACT_INPUT',
+        walletAddress: (config.walletAddress as string)?.match(/^0x[a-fA-F0-9]{40}$/)
+          ? (config.walletAddress as string)
+          : '0x0000000000000000000000000000000000000000',
+        slippageTolerance: typeof config.slippageTolerance === 'number' ? config.slippageTolerance : 0.5,
+      };
+      if (!tokens?.[fromSymbol] || !tokens?.[toSymbol]) {
+        warnings.push(
+          `SWAP: unknown token symbol(s) for chain ${chain}; using placeholder addresses. fromToken=${fromSymbol || '?'}, toToken=${toSymbol || '?'}.`
+        );
+      }
+      delete (config as any).fromToken;
+      delete (config as any).toToken;
+      delete (config as any).sourceToken;
+      delete (config as any).destinationToken;
+      break;
+    }
     case 'TELEGRAM': {
       if (telegramConnectionId && !config.connectionId) {
         config.connectionId = telegramConnectionId;

@@ -242,7 +242,7 @@ export function registerTextMessageHandler(
         telegramConnectionId,
       });
 
-      const created = await workflowClient.createWorkflow(executionUserId, {
+      const payload = {
         name: workflow.name,
         description: workflow.description,
         nodes: workflow.nodes,
@@ -251,7 +251,19 @@ export function registerTextMessageHandler(
         category: workflow.category,
         tags: workflow.tags,
         isPublic: workflow.isPublic,
-      });
+      };
+
+      let created: { id: string };
+      try {
+        created = await workflowClient.createWorkflow(executionUserId, payload);
+      } catch (firstError) {
+        if (tryPatchWorkflowPayloadFromValidationError(firstError, payload, telegramConnectionId)) {
+          logger.info({ chatId }, 'Retrying workflow create after patching connectionId from validation error');
+          created = await workflowClient.createWorkflow(executionUserId, payload);
+        } else {
+          throw firstError;
+        }
+      }
 
       logger.info({ chatId, userId, workflowId: created.id }, 'Workflow created');
 
@@ -297,10 +309,6 @@ export function registerTextMessageHandler(
             'Scheduled workflow monitor crashed',
           );
         });
-
-        await ctx.reply(
-          `Workflow created and scheduled. I'll check every ${Math.round(schedule.intervalSeconds / 60)} minutes for the next ${Math.round(schedule.durationSeconds / 3600)} hours and notify you here when action is needed.`,
-        );
       } else {
         const executed = await workflowClient.executeWorkflow(executionUserId, created.id);
 
@@ -331,10 +339,6 @@ export function registerTextMessageHandler(
             'Single execution monitor crashed',
           );
         });
-
-        await ctx.reply(
-          'Workflow created and running. I will notify you here when it completes or needs your signature.',
-        );
       }
     } catch (error) {
       const message = translateWorkflowError(error);
@@ -437,6 +441,40 @@ function formatSupportedCommandsReply(): string {
     '/plan <prompt> - Will provide the steps and providers that will be used for the prompt user describes with this command.',
     '/execute [prompt] - Executes already discussed plan or straight away executes according to accompanying prompt.',
   ].join('\n');
+}
+
+/**
+ * If the error is a 400 validation error for nodes.*.config.connectionId and we have
+ * telegramConnectionId, patch all TELEGRAM nodes in payload and return true so caller can retry.
+ * Mutates payload.nodes in place.
+ */
+function tryPatchWorkflowPayloadFromValidationError(
+  error: unknown,
+  payload: { nodes: Array<{ type: string; config?: Record<string, unknown> }> },
+  telegramConnectionId: string | undefined,
+): boolean {
+  if (!telegramConnectionId) return false;
+  const raw = error instanceof Error ? error.message : String(error);
+  const match = raw.match(/Failed to create workflow:\s*400\s+(.+)/s);
+  if (!match) return false;
+  let body: { error?: { details?: Array<{ field?: string }> } };
+  try {
+    body = JSON.parse(match[1].trim()) as { error?: { details?: Array<{ field?: string }> } };
+  } catch {
+    return false;
+  }
+  const details = body?.error?.details;
+  if (!Array.isArray(details)) return false;
+  const connectionIdError = details.some(
+    (d) => typeof d.field === 'string' && /nodes\.\d+\.config\.connectionId/.test(d.field),
+  );
+  if (!connectionIdError) return false;
+  for (const node of payload.nodes) {
+    if (node.type === 'TELEGRAM' && node.config) {
+      node.config.connectionId = telegramConnectionId;
+    }
+  }
+  return true;
 }
 
 /**
