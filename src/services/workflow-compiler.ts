@@ -55,6 +55,10 @@ export interface CompileWorkflowOptions {
    * Optional tags to attach to the workflow.
    */
   tags?: string[];
+  /**
+   * Telegram connection id for TELEGRAM nodes.
+   */
+  telegramConnectionId?: string;
 }
 
 export interface CompileWorkflowResult {
@@ -71,9 +75,14 @@ const TIME_BLOCK_NODE_TYPE = 'TIME_BLOCK';
 const DEFAULT_CATEGORY = 'automation';
 const DEFAULT_INTERVAL_SECONDS = 300;
 const DEFAULT_DURATION_SECONDS = 86_400;
+const DEFAULT_ORACLE_CHAIN = 'ARBITRUM';
+const CHAINLINK_ETH_USD_AGGREGATORS: Record<string, string> = {
+  ARBITRUM: '0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612',
+  ETHEREUM: '0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419',
+};
 
 export function compilePlannerResultToWorkflow(options: CompileWorkflowOptions): CompileWorkflowResult {
-  const { plan, chatId, category, tags } = options;
+  const { plan, chatId, category, tags, telegramConnectionId } = options;
 
   if (!plan.steps || plan.steps.length === 0) {
     throw new Error('Cannot compile workflow: planner returned no steps.');
@@ -138,7 +147,7 @@ export function compilePlannerResultToWorkflow(options: CompileWorkflowOptions):
 
   // 2) One node per non-trigger planner step
   const stepNodes: CompiledNode[] = stepsToCompile.map((step, index) =>
-    compileStepToNode(step, index, chatId, warnings),
+    compileStepToNode(step, index, chatId, warnings, telegramConnectionId),
   );
   nodes.push(...stepNodes);
 
@@ -257,6 +266,7 @@ function compileStepToNode(
   index: number,
   chatId: string | undefined,
   warnings: string[],
+  telegramConnectionId?: string,
 ): CompiledNode {
   const { blockId, purpose, configHints } = step;
 
@@ -283,6 +293,7 @@ function compileStepToNode(
     configHints,
     chatId,
     warnings,
+    telegramConnectionId,
   });
 
   return {
@@ -304,13 +315,14 @@ interface BuildConfigParams {
   configHints?: Record<string, string>;
   chatId?: string;
   warnings: string[];
+  telegramConnectionId?: string;
 }
 
 function buildBaseConfigForBlock(
   backendType: string,
   params: BuildConfigParams,
 ): Record<string, unknown> {
-  const { purpose, configHints, chatId, warnings } = params;
+  const { purpose, configHints, chatId, warnings, telegramConnectionId } = params;
 
   const config: Record<string, unknown> = {};
 
@@ -322,6 +334,12 @@ function buildBaseConfigForBlock(
 
   switch (backendType) {
     case 'TELEGRAM': {
+      if (telegramConnectionId && !config.connectionId) {
+        config.connectionId = telegramConnectionId;
+      }
+      if (!config.message && typeof config.text === 'string' && config.text.trim().length > 0) {
+        config.message = config.text.trim();
+      }
       if (!config.message) {
         config.message = purpose || 'Telegram notification from workflow.';
       }
@@ -336,6 +354,36 @@ function buildBaseConfigForBlock(
     case 'CHAINLINK_PRICE_ORACLE':
     case 'PYTH_PRICE_ORACLE':
     case 'PRICE_ORACLE': {
+      const provider = normalizeOracleProvider(config.provider, backendType);
+      config.provider = provider;
+      const chain = normalizeChain(config.chain);
+      config.chain = chain;
+
+      if (provider === 'CHAINLINK' && !config.aggregatorAddress) {
+        const guessed = guessAggregatorFromHints(chain, configHints);
+        if (guessed) {
+          config.aggregatorAddress = guessed;
+        }
+      }
+
+      if (provider === 'CHAINLINK' && !config.aggregatorAddress) {
+        config.aggregatorAddress =
+          CHAINLINK_ETH_USD_AGGREGATORS[chain] ?? CHAINLINK_ETH_USD_AGGREGATORS.ARBITRUM;
+        warnings.push('Oracle block missing aggregatorAddress; defaulted to Chainlink ETH/USD feed.');
+      }
+
+      if (provider === 'PYTH' && !config.priceFeedId) {
+        warnings.push('Pyth oracle block missing priceFeedId and will likely fail validation.');
+      }
+
+      if (!config.staleAfterSeconds) {
+        config.staleAfterSeconds = 3600;
+      }
+
+      if (typeof config.output === 'string' && config.output.trim().length > 0 && !config.outputMapping) {
+        config.outputMapping = { [config.output.trim()]: 'formattedAnswer' };
+      }
+
       if (!config.description) {
         config.description = purpose;
       }
@@ -346,6 +394,34 @@ function buildBaseConfigForBlock(
   }
 
   return config;
+}
+
+function normalizeChain(raw: unknown): string {
+  if (typeof raw !== 'string') return DEFAULT_ORACLE_CHAIN;
+  const normalized = raw.trim().toUpperCase().replace(/[\s-]+/g, '_');
+  return normalized || DEFAULT_ORACLE_CHAIN;
+}
+
+function normalizeOracleProvider(raw: unknown, backendType: string): 'CHAINLINK' | 'PYTH' {
+  if (typeof raw === 'string') {
+    const normalized = raw.trim().toUpperCase();
+    if (normalized === 'PYTH') return 'PYTH';
+    if (normalized === 'CHAINLINK') return 'CHAINLINK';
+  }
+  return backendType === 'PYTH_PRICE_ORACLE' ? 'PYTH' : 'CHAINLINK';
+}
+
+function guessAggregatorFromHints(
+  chain: string,
+  configHints?: Record<string, string>,
+): string | null {
+  const feed = String(configHints?.feed ?? '').toUpperCase().replace(/\s+/g, '');
+  const asset = String(configHints?.asset ?? '').toUpperCase();
+  const currency = String(configHints?.currency ?? '').toUpperCase();
+  const isEthUsd = feed === 'ETH/USD' || (asset === 'ETH' && currency === 'USD');
+
+  if (!isEthUsd) return null;
+  return CHAINLINK_ETH_USD_AGGREGATORS[chain] ?? CHAINLINK_ETH_USD_AGGREGATORS.ARBITRUM;
 }
 
 function validateCompiledWorkflow(workflow: CompiledWorkflow): void {

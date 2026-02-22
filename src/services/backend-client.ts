@@ -30,6 +30,16 @@ export interface BuildIntentRequest {
   steps: BuildIntentStep[];
 }
 
+export interface TelegramConnectionLookupRequest {
+  userId: string;
+  chatId: string;
+}
+
+export interface TelegramConnectionLookupResult {
+  connectionId: string;
+  userId: string;
+}
+
 export interface TransactionIntentResponse {
   id: string;
   userId: string;
@@ -162,6 +172,60 @@ export class BackendContextClient {
       return null;
     }
 
+  }
+
+  /**
+   * Resolve Telegram chatId to connectionId and linked Privy userId. Uses backend endpoint that accepts
+   * service key only (GET /connection-by-chat/:chatId). Returns both so the agent can create
+   * workflows under the real user (users table) not a synthetic id.
+   */
+  async fetchTelegramConnection(
+    request: TelegramConnectionLookupRequest,
+  ): Promise<TelegramConnectionLookupResult | null> {
+    if (!this.config.baseUrl || !this.config.serviceKey) return null;
+
+    const timeoutMs = this.config.requestTimeoutMs ?? 30_000;
+    const base = this.config.baseUrl.replace(/\/$/, '');
+    const endpoint = `${base}/api/v1/integrations/telegram/connection-by-chat/${encodeURIComponent(request.chatId)}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: {
+          'x-service-key': this.config.serviceKey,
+        },
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const payload = safeJsonParse<{
+        success?: boolean;
+        data?: { connectionId?: string; userId?: string };
+      }>(await response.text());
+
+      if (
+        !payload ||
+        payload.success !== true ||
+        !payload.data?.connectionId ||
+        !payload.data?.userId
+      ) {
+        return null;
+      }
+
+      return {
+        connectionId: payload.data.connectionId,
+        userId: payload.data.userId,
+      };
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 }
 

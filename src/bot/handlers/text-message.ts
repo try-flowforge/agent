@@ -8,6 +8,11 @@ import { WorkflowClient } from '../../services/workflow-client';
 import { monitorScheduledWorkflow, monitorSingleExecution } from '../../services/execution-monitor';
 
 type BotLogger = Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
+type SupportedCommand = 'plan' | 'execute';
+type ParsedTelegramCommand =
+  | { kind: 'supported'; command: SupportedCommand; args: string }
+  | { kind: 'unsupported' }
+  | { kind: 'not-command' };
 
 export interface TextHandlerBackendConfig {
   backendBaseUrl?: string;
@@ -45,6 +50,7 @@ export function registerTextMessageHandler(
       : null;
 
   const frontendBaseUrl = backendConfig?.frontendBaseUrl || 'https://flowforge.app';
+  const supportedCommandsReply = formatSupportedCommandsReply();
 
   bot.on('message:text', async (ctx) => {
     const chatId = ctx.chat.id;
@@ -85,268 +91,352 @@ export function registerTextMessageHandler(
       return;
     }
 
-    if (text.startsWith('/')) {
-      if (text === '/confirm') {
-        if (!workflowClient) {
-          await ctx.reply('Workflow execution is not configured (missing BACKEND_BASE_URL). Set it in .env to create and run workflows.');
-          return;
-        }
+    const parsedCommand = parseTelegramCommand(text);
+    if (parsedCommand.kind === 'unsupported') {
+      await ctx.reply(supportedCommandsReply);
+      return;
+    }
+    if (parsedCommand.kind === 'not-command') {
+      await ctx.reply(supportedCommandsReply);
+      return;
+    }
 
-        const session = sessions.get(chatId);
-        if (!session || !session.lastPlan) {
-          await ctx.reply('I do not have a pending workflow to confirm. Send a new request first.');
-          return;
-        }
-
-        if (session.lastPlan.missingInputs.length > 0) {
-          await ctx.reply(
-            'This plan still has missing details. Please answer the questions I asked (or send an updated request) before using /confirm.',
-          );
-          return;
-        }
-
-        try {
-          logger.info(
-            { chatId, userId, workflowName: session.lastPlan.workflowName, stepCount: session.lastPlan.steps.length },
-            'Compiling and executing confirmed workflow',
-          );
-
-          const { workflow, schedule } = compilePlannerResultToWorkflow({
-            plan: session.lastPlan,
-            chatId: String(chatId),
-          });
-
-          const created = await workflowClient.createWorkflow(session.userId, {
-            name: workflow.name,
-            description: workflow.description,
-            nodes: workflow.nodes,
-            edges: workflow.edges,
-            triggerNodeId: workflow.triggerNodeId,
-            category: workflow.category,
-            tags: workflow.tags,
-            isPublic: workflow.isPublic,
-          });
-
-          logger.info({ chatId, userId, workflowId: created.id }, 'Workflow created');
-
-          if (schedule) {
-            const now = new Date();
-            const untilAt = new Date(now.getTime() + schedule.durationSeconds * 1000);
-            const timeBlock = await workflowClient.createTimeBlock(session.userId, {
-              workflowId: created.id,
-              runAt: now.toISOString(),
-              recurrence: {
-                type: 'INTERVAL',
-                intervalSeconds: schedule.intervalSeconds,
-                untilAt: untilAt.toISOString(),
-              },
-            });
-
-            sessions.set(chatId, {
-              ...session,
-              lastWorkflowId: created.id,
-              lastTimeBlockId: timeBlock.id,
-            });
-
-            void monitorScheduledWorkflow({
-              bot,
-              chatId,
-              userId: session.userId,
-              workflowId: created.id,
-              timeBlockId: timeBlock.id,
-              durationSeconds: schedule.durationSeconds,
-              workflowClient,
-              signingBaseUrl: frontendBaseUrl,
-              logger,
-            }).catch((error) => {
-              logger.error(
-                {
-                  chatId,
-                  workflowId: created.id,
-                  errorMessage: error instanceof Error ? error.message : String(error),
-                },
-                'Scheduled workflow monitor crashed',
-              );
-            });
-
-            await ctx.reply(
-              `Workflow created and scheduled. I'll check every ${Math.round(schedule.intervalSeconds / 60)} minutes for the next ${Math.round(schedule.durationSeconds / 3600)} hours and notify you here when action is needed.`,
-            );
-          } else {
-            const executed = await workflowClient.executeWorkflow(session.userId, created.id);
-
-            logger.info({ chatId, userId, workflowId: created.id, executionId: executed.executionId }, 'Workflow execution started');
-
-            sessions.set(chatId, {
-              ...session,
-              lastWorkflowId: created.id,
-              lastExecutionId: executed.executionId,
-            });
-
-            void monitorSingleExecution({
-              bot,
-              chatId,
-              userId: session.userId,
-              executionId: executed.executionId,
-              workflowClient,
-              signingBaseUrl: frontendBaseUrl,
-              logger,
-            }).catch((error) => {
-              logger.error(
-                {
-                  chatId,
-                  executionId: executed.executionId,
-                  errorMessage: error instanceof Error ? error.message : String(error),
-                },
-                'Single execution monitor crashed',
-              );
-            });
-
-            await ctx.reply(
-              'Workflow created and running. I will notify you here when it completes or needs your signature.',
-            );
-          }
-        } catch (error) {
-          const message = translateWorkflowError(error);
-          logger.error(
-            {
-              chatId,
-              userId,
-              errorMessage: error instanceof Error ? error.message : String(error),
-            },
-            'Failed to create or execute workflow from confirmed plan',
-          );
-          await ctx.reply(message);
-        }
+    if (parsedCommand.command === 'plan') {
+      if (!parsedCommand.args) {
+        await ctx.reply('Usage: /plan <prompt>\nExample: /plan Get me the ETH price.');
         return;
       }
 
-      if (text === '/status') {
-        if (!workflowClient) {
-          await ctx.reply('Workflow status is not available (missing BACKEND_BASE_URL).');
-          return;
-        }
+      try {
+        const { agentUserId, plannerResult } = await buildPlannerResultForPrompt({
+          prompt: parsedCommand.args,
+          chatId,
+          userId,
+          backendContextClient,
+          llmClient,
+          logger,
+        });
 
-        const session = sessions.get(chatId);
-        if (!session || !session.lastExecutionId) {
-          await ctx.reply('No recent execution found for this chat. Use /confirm after sending a request first.');
-          return;
-        }
+        logger.info(
+          { chatId, userId, workflowName: plannerResult.workflowName, stepCount: plannerResult.steps.length, missingInputsCount: plannerResult.missingInputs.length },
+          'Planner result received for /plan',
+        );
 
-        try {
-          const status = await workflowClient.getExecutionStatus(session.userId, session.lastExecutionId);
+        const existingSession = sessions.get(chatId);
+        sessions.set(chatId, {
+          userId: agentUserId,
+          lastPlan: plannerResult,
+          lastWorkflowId: existingSession?.lastWorkflowId,
+          lastExecutionId: existingSession?.lastExecutionId,
+          lastTimeBlockId: existingSession?.lastTimeBlockId,
+        });
 
-          await ctx.reply(
-            [
-              `Execution ${status.id}: ${status.status}`,
-              status.started_at ? `Started: ${status.started_at}` : '',
-              status.finished_at ? `Finished: ${status.finished_at}` : '',
-            ]
-              .filter(Boolean)
-              .join('\n'),
-          );
-        } catch (error) {
-          const message = translateWorkflowError(error);
-          logger.error(
-            {
-              chatId,
-              userId,
-              errorMessage: error instanceof Error ? error.message : String(error),
-            },
-            'Failed to fetch execution status',
-          );
-          await ctx.reply(message);
-        }
+        await replyInChunks(ctx, formatPlannerReply(plannerResult));
+      } catch (error) {
+        logger.error(
+          {
+            chatId,
+            userId,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            errorStack: error instanceof Error ? error.stack : undefined,
+          },
+          'Failed to get llm-service response for /plan',
+        );
+        await ctx.reply('I could not get a response from llm-service. Please try again.');
+      }
+      return;
+    }
+
+    if (!workflowClient) {
+      await ctx.reply('Workflow execution is not configured (missing BACKEND_BASE_URL). Set it in .env to use /execute.');
+      return;
+    }
+
+    let session = sessions.get(chatId);
+    let planToExecute: PlannerResult | undefined = session?.lastPlan;
+    let executionUserId = session?.userId ?? (userId ? `telegram-user-${userId}` : `telegram-chat-${chatId}`);
+
+    if (parsedCommand.args) {
+      try {
+        const { agentUserId, plannerResult } = await buildPlannerResultForPrompt({
+          prompt: parsedCommand.args,
+          chatId,
+          userId,
+          backendContextClient,
+          llmClient,
+          logger,
+        });
+
+        logger.info(
+          { chatId, userId, workflowName: plannerResult.workflowName, stepCount: plannerResult.steps.length, missingInputsCount: plannerResult.missingInputs.length },
+          'Planner result received for /execute',
+        );
+
+        executionUserId = agentUserId;
+        const existingSession = sessions.get(chatId);
+        sessions.set(chatId, {
+          userId: agentUserId,
+          lastPlan: plannerResult,
+          lastWorkflowId: existingSession?.lastWorkflowId,
+          lastExecutionId: existingSession?.lastExecutionId,
+          lastTimeBlockId: existingSession?.lastTimeBlockId,
+        });
+        session = sessions.get(chatId);
+        planToExecute = plannerResult;
+      } catch (error) {
+        logger.error(
+          {
+            chatId,
+            userId,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            errorStack: error instanceof Error ? error.stack : undefined,
+          },
+          'Failed to get llm-service response for /execute',
+        );
+        await ctx.reply('I could not get a response from llm-service. Please try again.');
         return;
       }
+    }
 
+    if (!planToExecute) {
+      await ctx.reply('No plan found for this chat. Run /plan <prompt> first, or use /execute <prompt>.');
+      return;
+    }
+
+    if (planToExecute.missingInputs.length > 0) {
+      await replyInChunks(ctx, formatPlannerReply(planToExecute));
+      await ctx.reply('Cannot execute yet. Add the missing details, then run /execute <updated prompt>.');
       return;
     }
 
     try {
-      const agentUserId = userId ? `telegram-user-${userId}` : `telegram-chat-${chatId}`;
-      const chatIdStr = String(chatId);
-
-      // Fetch user context before first planner call so the LLM has telegramChatId etc. upfront
-      const requestedFieldsForContext = [
-        'telegramChatId',
-        'privyUserId',
-        'userAddress',
-        'preferredChains',
-        'preferredTokens',
-      ];
-      const backendContext = await backendContextClient.fetchPlannerContext({
-        userId: agentUserId,
-        telegramUserId: userId ? String(userId) : undefined,
-        chatId: chatIdStr,
-        requestedFields: requestedFieldsForContext,
-        prompt: text,
-      });
-
-      // Always pass at least telegramChatId (current chat) so the LLM can fill notification steps
-      const userContext: Record<string, string | number | boolean | string[]> = {
-        ...(backendContext ?? {}),
-        telegramChatId: chatIdStr,
-      };
-      if (backendContext && Object.keys(backendContext).length > 0) {
-        logger.info({ chatId, userId, contextKeys: Object.keys(backendContext) }, 'Using backend context for planner');
-      }
-
-      let plannerResult = await llmClient.generateWorkflowPlan({
-        prompt: text,
-        userId: agentUserId,
-        supplementalContext: userContext,
-      });
-
-      // If the first pass still has missing inputs, try refining with a focused context fetch
-      if (plannerResult.missingInputs.length > 0) {
-        const requestedFields = plannerResult.missingInputs.map((item) => item.field);
-        const refineContext = await backendContextClient.fetchPlannerContext({
-          userId: agentUserId,
-          telegramUserId: userId ? String(userId) : undefined,
-          chatId: chatIdStr,
-          requestedFields,
-          prompt: text,
-        });
-
-        if (refineContext && Object.keys(refineContext).length > 0) {
-          logger.info({ chatId, userId, contextKeys: Object.keys(refineContext) }, 'Refining planner with backend context');
-          const mergedContext = { ...userContext, ...refineContext };
-          plannerResult = await llmClient.generateWorkflowPlan({
-            prompt: text,
-            userId: agentUserId,
-            supplementalContext: mergedContext,
-          });
-        }
-      }
-
       logger.info(
-        { chatId, userId, workflowName: plannerResult.workflowName, stepCount: plannerResult.steps.length, missingInputsCount: plannerResult.missingInputs.length },
-        'Planner result received',
+        { chatId, userId, workflowName: planToExecute.workflowName, stepCount: planToExecute.steps.length },
+        'Compiling and executing workflow from /execute',
       );
 
-      await replyInChunks(ctx, formatPlannerReply(plannerResult));
+      const chatIdStr = String(chatId);
+      const requiresTelegramConnection = planToExecute.steps.some((step) => step.blockId === 'telegram');
+      let telegramConnectionId: string | undefined;
 
-      const existingSession = sessions.get(chatId);
-      sessions.set(chatId, {
-        userId: agentUserId,
-        lastPlan: plannerResult,
-        lastWorkflowId: existingSession?.lastWorkflowId,
-        lastExecutionId: existingSession?.lastExecutionId,
+      if (requiresTelegramConnection) {
+        const connection = await backendContextClient.fetchTelegramConnection({
+          userId: executionUserId,
+          chatId: chatIdStr,
+        });
+
+        if (!connection) {
+          await ctx.reply(
+            'Telegram connection is not linked for this chat. Send your `verify-...` code first, then run /execute again.',
+          );
+          return;
+        }
+
+        telegramConnectionId = connection.connectionId;
+        executionUserId = connection.userId;
+      }
+
+      const { workflow, schedule } = compilePlannerResultToWorkflow({
+        plan: planToExecute,
+        chatId: chatIdStr,
+        telegramConnectionId,
       });
+
+      const created = await workflowClient.createWorkflow(executionUserId, {
+        name: workflow.name,
+        description: workflow.description,
+        nodes: workflow.nodes,
+        edges: workflow.edges,
+        triggerNodeId: workflow.triggerNodeId,
+        category: workflow.category,
+        tags: workflow.tags,
+        isPublic: workflow.isPublic,
+      });
+
+      logger.info({ chatId, userId, workflowId: created.id }, 'Workflow created');
+
+      const sessionForWrite = session ?? { userId: executionUserId };
+
+      if (schedule) {
+        const now = new Date();
+        const untilAt = new Date(now.getTime() + schedule.durationSeconds * 1000);
+        const timeBlock = await workflowClient.createTimeBlock(executionUserId, {
+          workflowId: created.id,
+          runAt: now.toISOString(),
+          recurrence: {
+            type: 'INTERVAL',
+            intervalSeconds: schedule.intervalSeconds,
+            untilAt: untilAt.toISOString(),
+          },
+        });
+
+        sessions.set(chatId, {
+          ...sessionForWrite,
+          lastPlan: planToExecute,
+          lastWorkflowId: created.id,
+          lastTimeBlockId: timeBlock.id,
+        });
+
+        void monitorScheduledWorkflow({
+          bot,
+          chatId,
+          userId: executionUserId,
+          workflowId: created.id,
+          timeBlockId: timeBlock.id,
+          durationSeconds: schedule.durationSeconds,
+          workflowClient,
+          signingBaseUrl: frontendBaseUrl,
+          logger,
+        }).catch((error) => {
+          logger.error(
+            {
+              chatId,
+              workflowId: created.id,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            },
+            'Scheduled workflow monitor crashed',
+          );
+        });
+
+        await ctx.reply(
+          `Workflow created and scheduled. I'll check every ${Math.round(schedule.intervalSeconds / 60)} minutes for the next ${Math.round(schedule.durationSeconds / 3600)} hours and notify you here when action is needed.`,
+        );
+      } else {
+        const executed = await workflowClient.executeWorkflow(executionUserId, created.id);
+
+        logger.info({ chatId, userId, workflowId: created.id, executionId: executed.executionId }, 'Workflow execution started');
+
+        sessions.set(chatId, {
+          ...sessionForWrite,
+          lastPlan: planToExecute,
+          lastWorkflowId: created.id,
+          lastExecutionId: executed.executionId,
+        });
+
+        void monitorSingleExecution({
+          bot,
+          chatId,
+          userId: executionUserId,
+          executionId: executed.executionId,
+          workflowClient,
+          signingBaseUrl: frontendBaseUrl,
+          logger,
+        }).catch((error) => {
+          logger.error(
+            {
+              chatId,
+              executionId: executed.executionId,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            },
+            'Single execution monitor crashed',
+          );
+        });
+
+        await ctx.reply(
+          'Workflow created and running. I will notify you here when it completes or needs your signature.',
+        );
+      }
     } catch (error) {
+      const message = translateWorkflowError(error);
       logger.error(
         {
           chatId,
           userId,
           errorMessage: error instanceof Error ? error.message : String(error),
-          errorStack: error instanceof Error ? error.stack : undefined,
         },
-        'Failed to get llm-service response',
+        'Failed to create or execute workflow from /execute',
       );
-      await ctx.reply('I could not get a response from llm-service. Please try again.');
+      await ctx.reply(message);
     }
   });
+}
+
+async function buildPlannerResultForPrompt(params: {
+  prompt: string;
+  chatId: number;
+  userId: number | undefined;
+  backendContextClient: BackendContextClient;
+  llmClient: LlmServiceClient;
+  logger: BotLogger;
+}): Promise<{ agentUserId: string; plannerResult: PlannerResult }> {
+  const agentUserId = params.userId ? `telegram-user-${params.userId}` : `telegram-chat-${params.chatId}`;
+  const chatIdStr = String(params.chatId);
+
+  const requestedFieldsForContext = [
+    'telegramChatId',
+    'privyUserId',
+    'userAddress',
+    'preferredChains',
+    'preferredTokens',
+  ];
+  const backendContext = await params.backendContextClient.fetchPlannerContext({
+    userId: agentUserId,
+    telegramUserId: params.userId ? String(params.userId) : undefined,
+    chatId: chatIdStr,
+    requestedFields: requestedFieldsForContext,
+    prompt: params.prompt,
+  });
+
+  const userContext: Record<string, string | number | boolean | string[]> = {
+    ...(backendContext ?? {}),
+    telegramChatId: chatIdStr,
+  };
+  if (backendContext && Object.keys(backendContext).length > 0) {
+    params.logger.info({ chatId: params.chatId, userId: params.userId, contextKeys: Object.keys(backendContext) }, 'Using backend context for planner');
+  }
+
+  let plannerResult = await params.llmClient.generateWorkflowPlan({
+    prompt: params.prompt,
+    userId: agentUserId,
+    supplementalContext: userContext,
+  });
+
+  if (plannerResult.missingInputs.length > 0) {
+    const requestedFields = plannerResult.missingInputs.map((item) => item.field);
+    const refineContext = await params.backendContextClient.fetchPlannerContext({
+      userId: agentUserId,
+      telegramUserId: params.userId ? String(params.userId) : undefined,
+      chatId: chatIdStr,
+      requestedFields,
+      prompt: params.prompt,
+    });
+
+    if (refineContext && Object.keys(refineContext).length > 0) {
+      params.logger.info({ chatId: params.chatId, userId: params.userId, contextKeys: Object.keys(refineContext) }, 'Refining planner with backend context');
+      const mergedContext = { ...userContext, ...refineContext };
+      plannerResult = await params.llmClient.generateWorkflowPlan({
+        prompt: params.prompt,
+        userId: agentUserId,
+        supplementalContext: mergedContext,
+      });
+    }
+  }
+
+  return { agentUserId, plannerResult };
+}
+
+function parseTelegramCommand(text: string): ParsedTelegramCommand {
+  const commandMatch = text.trim().match(/^\/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]+))?$/);
+  if (!commandMatch) {
+    return { kind: 'not-command' };
+  }
+
+  const command = commandMatch[1].toLowerCase();
+  const args = (commandMatch[2] ?? '').trim();
+
+  if (command === 'plan' || command === 'execute') {
+    return { kind: 'supported', command, args };
+  }
+
+  return { kind: 'unsupported' };
+}
+
+function formatSupportedCommandsReply(): string {
+  return [
+    'Use one of these commands:',
+    '/plan <prompt> - Will provide the steps and providers that will be used for the prompt user describes with this command.',
+    '/execute [prompt] - Executes already discussed plan or straight away executes according to accompanying prompt.',
+  ].join('\n');
 }
 
 /**
@@ -440,7 +530,11 @@ function formatPlannerReply(plan: PlannerResult): string {
   }
 
   lines.push('');
-  lines.push('Reply /confirm to create & run this as a workflow, or edit your request.');
+  if (plan.missingInputs.length > 0) {
+    lines.push('Add the missing details, then run /plan <updated prompt> or /execute <updated prompt>.');
+  } else {
+    lines.push('Run /execute to create and run this workflow.');
+  }
 
   return lines.join('\n');
 }

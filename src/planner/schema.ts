@@ -1,13 +1,18 @@
 const stepSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['blockId', 'purpose'],
+  required: ['blockId', 'purpose', 'configHints'],
   properties: {
     blockId: { type: 'string', minLength: 1, maxLength: 100 },
     purpose: { type: 'string', minLength: 1, maxLength: 240 },
     configHints: {
-      type: 'object',
-      additionalProperties: { type: 'string' },
+      anyOf: [
+        {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+        },
+        { type: 'null' },
+      ],
     },
   },
 };
@@ -25,14 +30,19 @@ const missingInputSchema = {
 const noteSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['type', 'message'],
+  required: ['type', 'message', 'field'],
   properties: {
     type: {
       type: 'string',
       enum: ['missing_data', 'assumption', 'risk', 'preference', 'other'],
     },
     message: { type: 'string', minLength: 1, maxLength: 280 },
-    field: { type: 'string', minLength: 1, maxLength: 120 },
+    field: {
+      anyOf: [
+        { type: 'string', minLength: 1, maxLength: 120 },
+        { type: 'null' },
+      ],
+    },
   },
 };
 
@@ -59,7 +69,7 @@ const headedSchema = {
     heading2_notes: {
       type: 'object',
       additionalProperties: false,
-      required: ['missingInputs'],
+      required: ['missingInputs', 'notes'],
       properties: {
         missingInputs: {
           type: 'array',
@@ -76,6 +86,4 @@ const headedSchema = {
   },
 };
 
-export const plannerResponseSchema: Record<string, unknown> = {
-  anyOf: [headedSchema],
-};
+export const plannerResponseSchema: Record<string, unknown> = headedSchema;

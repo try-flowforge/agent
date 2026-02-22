@@ -35,8 +35,10 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-function parseMode(input: string | undefined): BotMode {
-  return input === 'webhook' ? 'webhook' : 'polling';
+function parseMode(input: string | undefined, appBaseUrl: string | undefined): BotMode {
+  if (input === 'webhook') return 'webhook';
+  if (appBaseUrl) return 'webhook';
+  return 'polling';
 }
 
 export function loadEnv(): AppEnv {
@@ -56,10 +58,11 @@ export function loadEnv(): AppEnv {
     DEFAULT_BACKEND_REQUEST_TIMEOUT_MS,
   );
 
+  const appBaseUrl = process.env.APP_BASE_URL;
   return {
     port,
-    mode: parseMode(process.env.TELEGRAM_MODE),
-    appBaseUrl: process.env.APP_BASE_URL,
+    mode: parseMode(process.env.TELEGRAM_MODE, appBaseUrl),
+    appBaseUrl,
     telegramBotToken: requiredEnv('TELEGRAM_BOT_TOKEN'),
     telegramWebhookPath: process.env.TELEGRAM_WEBHOOK_PATH ?? '/telegram/webhook',
     telegramWebhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
