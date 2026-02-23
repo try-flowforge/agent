@@ -363,6 +363,58 @@ interface BuildConfigParams {
   telegramConnectionId?: string;
 }
 
+const IF_OPERATOR_MAP: Record<string, 'lt' | 'gt' | 'lte' | 'gte' | 'equals' | 'notEquals'> = {
+  '<': 'lt',
+  '>': 'gt',
+  '<=': 'lte',
+  '>=': 'gte',
+  '==': 'equals',
+  '=': 'equals',
+  '!=': 'notEquals',
+};
+
+/**
+ * Parse a condition string like "ETH/USD < 1750" or "price > 100" into IF node config.
+ * For price-feed style left sides (e.g. ETH/USD), leftPath is set to "formattedAnswer" (oracle output key).
+ */
+function parseIfConditionString(
+  condition: string,
+): { leftPath: string; operator: string; rightValue: string } | null {
+  const trimmed = condition.trim();
+  // Match operator (longest first): <=, >=, ==, !=, <, >, =
+  const operatorMatch = trimmed.match(/\s*(<=|>=|==|!=|<|>|=)\s*/);
+  if (!operatorMatch) return null;
+
+  const op = operatorMatch[1];
+  const operator = IF_OPERATOR_MAP[op];
+  if (!operator) return null;
+
+  const [left, right] = trimmed.split(operatorMatch[0], 2).map((s) => s.trim());
+  if (left === undefined || right === undefined) return null;
+
+  // Price-feed style (e.g. "ETH/USD", "BTC/USD") -> use oracle output key
+  const leftPath = /^[A-Z0-9]+\/[A-Z0-9]+$/i.test(left)
+    ? 'formattedAnswer'
+    : left;
+
+  return {
+    leftPath,
+    operator,
+    rightValue: right,
+  };
+}
+
+function looksLikePriceFeedPath(path: string): boolean {
+  if (!path || typeof path !== 'string') return false;
+  const s = path.trim();
+  return (
+    /^[A-Z0-9]+\/[A-Z0-9]+$/i.test(s) ||
+    /^[A-Z0-9]+\/[A-Z0-9]+\s+price$/i.test(s) ||
+    /^[A-Z0-9]+USD$/i.test(s) ||
+    s.toLowerCase() === 'price'
+  );
+}
+
 function buildBaseConfigForBlock(
   backendType: string,
   params: BuildConfigParams,
@@ -437,6 +489,27 @@ function buildBaseConfigForBlock(
       }
       if (!config.connectionId) {
         warnings.push('Telegram block is missing connectionId and will likely fail validation.');
+      }
+      break;
+    }
+    case 'IF': {
+      // Planner may send condition as a string (e.g. "ETH/USD < 1750"). Parse into leftPath, operator, rightValue.
+      const conditionStr = typeof config.condition === 'string' ? config.condition.trim() : '';
+      if (conditionStr) {
+        const parsed = parseIfConditionString(conditionStr);
+        if (parsed) {
+          config.leftPath = parsed.leftPath;
+          config.operator = parsed.operator;
+          config.rightValue = parsed.rightValue;
+        }
+        delete (config as Record<string, unknown>).condition;
+      }
+      if (!config.leftPath) config.leftPath = '';
+      if (!config.operator) config.operator = 'equals';
+      if (config.rightValue === undefined) config.rightValue = '';
+      // Planner sometimes sends leftPath like "ETH/USD price" or "ETHUSD"; normalize to oracle output key.
+      if (typeof config.leftPath === 'string' && looksLikePriceFeedPath(config.leftPath)) {
+        config.leftPath = 'formattedAnswer';
       }
       break;
     }

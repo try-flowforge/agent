@@ -4,6 +4,18 @@ import type { WorkflowClient, WorkflowExecutionStatus } from './workflow-client'
 
 type MonitorLogger = Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
 
+/** Block explorer base URL for tx path (append txHash). */
+const EXPLORER_TX_URL_BY_CHAIN: Record<string, string> = {
+  ARBITRUM: 'https://arbiscan.io/tx/',
+  ARBITRUM_SEPOLIA: 'https://sepolia.arbiscan.io/tx/',
+  ETHEREUM: 'https://etherscan.io/tx/',
+  ETHEREUM_SEPOLIA: 'https://sepolia.etherscan.io/tx/',
+  BASE: 'https://basescan.org/tx/',
+  UNICHAIN: 'https://unichain.blockscout.com/tx/',
+  UNICHAIN_SEPOLIA: 'https://sepolia-unichain.blockscout.com/tx/',
+};
+const DEFAULT_EXPLORER_TX_URL = 'https://etherscan.io/tx/';
+
 const SCHEDULED_POLL_MS = 30_000;
 const SINGLE_EXECUTION_POLL_MS = 5_000;
 
@@ -82,7 +94,10 @@ export async function monitorScheduledWorkflow(params: ScheduledMonitorParams): 
 
           if (finalStatus?.status === 'SUCCESS') {
             await safeCancelTimeBlock(workflowClient, userId, timeBlockId, logger);
-            await safeSendMessage(bot, chatId, 'Swap executed successfully. Monitoring is now stopped.', logger);
+            const msg = finalStatus
+              ? appendTxLinks('Swap executed successfully. Monitoring is now stopped.', finalStatus)
+              : 'Swap executed successfully. Monitoring is now stopped.';
+            await safeSendMessage(bot, chatId, msg, logger);
             return;
           }
           continue;
@@ -92,7 +107,10 @@ export async function monitorScheduledWorkflow(params: ScheduledMonitorParams): 
           const details = await safeGetExecutionStatus(workflowClient, userId, execution.id, logger);
           if (didSwapExecute(details ?? execution)) {
             await safeCancelTimeBlock(workflowClient, userId, timeBlockId, logger);
-            await safeSendMessage(bot, chatId, 'Swap executed successfully. Monitoring is now stopped.', logger);
+            const msg = details
+              ? appendTxLinks('Swap executed successfully. Monitoring is now stopped.', details)
+              : 'Swap executed successfully. Monitoring is now stopped.';
+            await safeSendMessage(bot, chatId, msg, logger);
             return;
           }
         }
@@ -171,7 +189,8 @@ async function waitForSingleExecutionTerminal(
       }
 
       if (state === 'SUCCESS') {
-        await safeSendMessage(bot, chatId, 'Workflow completed successfully.', logger);
+        const message = buildSuccessMessage(status);
+        await safeSendMessage(bot, chatId, message, logger);
         return status;
       }
 
@@ -218,6 +237,38 @@ function didSwapExecute(execution: WorkflowExecutionStatus): boolean {
   }
 
   return false;
+}
+
+/** Extract tx hash and optional chain from node outputs (e.g. SWAP node output_data). */
+function getTxLinksFromExecution(status: WorkflowExecutionStatus): Array<{ txHash: string; url: string; chain?: string }> {
+  const links: Array<{ txHash: string; url: string; chain?: string }> = [];
+  const nodes = status.nodeExecutions ?? [];
+  for (const node of nodes as Array<Record<string, unknown>>) {
+    const out = node.output_data as Record<string, unknown> | undefined;
+    if (!out || typeof out !== 'object') continue;
+    const txHash = typeof out.txHash === 'string' ? out.txHash.trim() : null;
+    if (!txHash || !/^0x[a-fA-F0-9]{64}$/.test(txHash)) continue;
+    const chain = typeof out.chain === 'string' ? out.chain.trim().toUpperCase().replace(/\s+/g, '_') : undefined;
+    const base = chain ? EXPLORER_TX_URL_BY_CHAIN[chain] ?? DEFAULT_EXPLORER_TX_URL : DEFAULT_EXPLORER_TX_URL;
+    links.push({ txHash, url: `${base}${txHash}`, chain });
+  }
+  return links;
+}
+
+/** Build the success message to send to the user, including tx link(s) if any. */
+function buildSuccessMessage(status: WorkflowExecutionStatus): string {
+  return appendTxLinks('Workflow completed successfully.', status);
+}
+
+/** Append transaction explorer link(s) to a base message when execution produced tx(s). */
+function appendTxLinks(baseMessage: string, status: WorkflowExecutionStatus): string {
+  const txLinks = getTxLinksFromExecution(status);
+  if (txLinks.length === 0) return baseMessage;
+  const lines = [baseMessage];
+  for (const { url } of txLinks) {
+    lines.push(`Transaction: ${url}`);
+  }
+  return lines.join('\n');
 }
 
 async function sendSigningMessage(params: {
