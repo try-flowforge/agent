@@ -5,6 +5,7 @@
 import { createTelegramBot, registerBotHandlers } from './bot/register';
 import { loadEnv } from './config/env';
 import { createServer, registerWebhookRoute } from './server/create-server';
+import { registerUniformApiRoutes } from './server/routes/uniform-api';
 import { BackendContextClient } from './services/backend-client';
 import { LlmServiceClient } from './services/planner-client';
 import { WorkflowClient } from './services/workflow-client';
@@ -16,18 +17,20 @@ import {
 const TELEGRAM_COMMANDS = [
   {
     command: 'plan',
-    description: 'Will provide the steps and providers that will be used for the prompt user describes with this command.',
+    description:
+      'Will provide the steps and providers that will be used for the prompt user describes with this command.',
   },
   {
     command: 'execute',
-    description: 'Executes already discussed plan or straight away executes according to accompanying prompt.',
+    description:
+      'Executes already discussed plan or straight away executes according to accompanying prompt.',
   },
 ] as const;
 
 async function main() {
   const env = loadEnv();
   const server = createServer(env.mode);
-  const bot = createTelegramBot(env.telegramBotToken);
+
   const llmClient = new LlmServiceClient({
     baseUrl: env.llmServiceBaseUrl,
     hmacSecret: env.llmServiceHmacSecret,
@@ -136,18 +139,20 @@ async function main() {
     process.exit(1);
   }
 
-  if (env.mode === 'polling') {
+  if (telegramBot && env.mode === 'polling') {
     const maxPollRetries = 3;
-    for (let attempt = 1; attempt <= maxPollRetries; attempt++) {
+    for (let attempt = 1; attempt <= maxPollRetries; attempt += 1) {
       try {
-        await bot.api.deleteWebhook({ drop_pending_updates: false });
-        server.log.info('Cleared any existing Telegram webhook so polling can receive updates');
+        await telegramBot.api.deleteWebhook({ drop_pending_updates: false });
+        server.log.info(
+          'Cleared any existing Telegram webhook so polling can receive updates',
+        );
       } catch (err) {
         server.log.warn({ err }, 'deleteWebhook failed (non-fatal)');
       }
       server.log.info({ attempt }, 'Starting Telegram bot in long polling mode');
       try {
-        await bot.start({
+        await telegramBot.start({
           drop_pending_updates: attempt === 1,
           onStart: () => {
             server.log.info('Telegram bot polling started');
@@ -160,7 +165,7 @@ async function main() {
         if (isWebhookConflict && attempt < maxPollRetries) {
           server.log.warn(
             { attempt, maxPollRetries },
-            'Polling ended due to webhook conflict (another process may have set webhook). Clearing webhook and retrying.',
+            'Polling ended due to webhook conflict. Clearing webhook and retrying.',
           );
           continue;
         }
