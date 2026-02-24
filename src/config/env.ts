@@ -11,7 +11,8 @@ export interface AppEnv {
   port: number;
   mode: BotMode;
   appBaseUrl?: string;
-  telegramBotToken: string;
+  /** When unset, Telegram bot and webhook are not registered (uniform API and health still work). */
+  telegramBotToken?: string;
   telegramWebhookPath: string;
   telegramWebhookSecret?: string;
   llmServiceBaseUrl: string;
@@ -63,7 +64,7 @@ export function loadEnv(): AppEnv {
     port,
     mode: parseMode(process.env.TELEGRAM_MODE, appBaseUrl),
     appBaseUrl,
-    telegramBotToken: requiredEnv('TELEGRAM_BOT_TOKEN'),
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
     telegramWebhookPath: process.env.TELEGRAM_WEBHOOK_PATH ?? '/telegram/webhook',
     telegramWebhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
     llmServiceBaseUrl: requiredEnv('LLM_SERVICE_BASE_URL'),

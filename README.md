@@ -21,18 +21,29 @@ Built for the EigenCloud Open Innovation Challenge as a verifiable agent - deter
 ## Requirements
 
 - Node.js 20+
-- Environment variables (see `.env.example`): Telegram bot token, backend URL, service key, LLM service URL for deterministic planning.
+- Environment variables (see `.env.example`): **Required:** `LLM_SERVICE_BASE_URL`, `LLM_SERVICE_HMAC_SECRET`. **Optional:** `TELEGRAM_BOT_TOKEN` (if unset, only the uniform API runs), backend URL and service key for execute and context.
 
 ## Run locally
 
 ```bash
 npm install
 cp .env.example .env
-# Edit .env with TELEGRAM_BOT_TOKEN
+# Required: set LLM_SERVICE_BASE_URL, LLM_SERVICE_HMAC_SECRET
+# Optional: TELEGRAM_BOT_TOKEN for Telegram; BACKEND_SERVICE_KEY (and BACKEND_BASE_URL) for uniform API auth and execute
 npm run dev
 ```
 
-By default, the bot uses long polling (`TELEGRAM_MODE=polling`), so you can message your bot immediately and see logs in the server output.
+- With `TELEGRAM_BOT_TOKEN` set, the bot uses long polling by default (`TELEGRAM_MODE=polling`); you can message the bot and see logs in the server output.
+- Without `TELEGRAM_BOT_TOKEN`, the server still starts and exposes **POST /v1/plan** and **POST /v1/execute** (uniform API). Use `X-Service-Key` (same as `BACKEND_SERVICE_KEY`) and `X-On-Behalf-Of` (userId) to call them.
+
+## Testing the implementation
+
+1. **Backend**: Run migrations (includes `051_create_agent_user_context_table`). Ensure `AGENT_SERVICE_KEY` is set (agent uses this as `BACKEND_SERVICE_KEY` for auth).
+2. **LLM service**: Running and reachable at `LLM_SERVICE_BASE_URL`.
+3. **Agent**:
+   - **Telegram**: Set `TELEGRAM_BOT_TOKEN`, `BACKEND_BASE_URL`, `BACKEND_SERVICE_KEY`. Start with `npm run dev`; use `/plan` and `/execute` in the bot.
+   - **Uniform API only**: Leave `TELEGRAM_BOT_TOKEN` unset. Set `BACKEND_SERVICE_KEY` (and `BACKEND_BASE_URL` for execute/context). Start agent; then e.g. `curl -X POST http://localhost:PORT/v1/plan -H "Content-Type: application/json" -H "X-Service-Key: YOUR_KEY" -H "X-On-Behalf-Of: test-user-id" -d '{"prompt":"Get ETH price"}'`.
+4. **User context**: Backend exposes `GET/PATCH /api/v1/users/me/agent-context` (Privy auth) to read/update stored agent context; POST /api/v1/agent/context merges that with Telegram link data for the planner.
 
 ## Telegram bootstrap (current milestone)
 
