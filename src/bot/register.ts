@@ -1,8 +1,8 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { Bot } from 'grammy';
 import { registerTextMessageHandler } from './handlers/text-message';
-import type { BackendContextClient } from '../services/backend-client';
-import type { LlmServiceClient } from '../services/planner-client';
+import type { AgentService } from '../core/agent-service';
+import type { WorkflowClient } from '../services/workflow-client';
 import type { TextHandlerBackendConfig } from './handlers/text-message';
 
 type BotLogger = Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
@@ -14,11 +14,17 @@ export function createTelegramBot(token: string): Bot {
 export function registerBotHandlers(
   bot: Bot,
   logger: BotLogger,
-  llmClient: LlmServiceClient,
-  backendContextClient: BackendContextClient,
-  backendConfig?: TextHandlerBackendConfig,
+  agentService: AgentService,
+  backendConfig: TextHandlerBackendConfig | undefined,
+  workflowClient: WorkflowClient | null,
 ): void {
-  registerTextMessageHandler(bot, logger, llmClient, backendContextClient, backendConfig);
+  registerTextMessageHandler(
+    bot,
+    logger,
+    agentService,
+    backendConfig,
+    workflowClient,
+  );
 
   bot.catch((error) => {
     logger.error({ error }, 'Telegram bot error');

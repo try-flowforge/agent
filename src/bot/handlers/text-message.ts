@@ -1,7 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 import type { Bot, Context } from 'grammy';
-import type { BackendContextClient } from '../../services/backend-client';
-import type { LlmServiceClient } from '../../services/planner-client';
+import type { AgentService } from '../../core/agent-service';
 import type { PlannerResult } from '../../planner/plan-types';
 import { compilePlannerResultToWorkflow } from '../../services/workflow-compiler';
 import { WorkflowClient } from '../../services/workflow-client';
@@ -24,9 +23,9 @@ export interface TextHandlerBackendConfig {
 export function registerTextMessageHandler(
   bot: Bot,
   logger: BotLogger,
-  llmClient: LlmServiceClient,
-  backendContextClient: BackendContextClient,
-  backendConfig?: TextHandlerBackendConfig,
+  agentService: AgentService,
+  backendConfig: TextHandlerBackendConfig | undefined,
+  workflowClient: WorkflowClient | null,
 ): void {
   type Session = {
     userId: string;
@@ -67,22 +66,35 @@ export function registerTextMessageHandler(
       const chatType = ctx.chat.type ?? 'private';
       try {
         const baseUrl = backendConfig.backendBaseUrl.replace(/\/$/, '');
-        const res = await fetch(`${baseUrl}/api/v1/integrations/telegram/verification/verify-from-agent`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-service-key': backendConfig.backendServiceKey,
+        const res = await fetch(
+          `${baseUrl}/api/v1/integrations/telegram/verification/verify-from-agent`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-service-key': backendConfig.backendServiceKey,
+            },
+            body: JSON.stringify({
+              code,
+              chatId: String(chatId),
+              chatTitle,
+              chatType,
+            }),
+            signal: AbortSignal.timeout(
+              backendConfig.backendRequestTimeoutMs ?? 30_000,
+            ),
           },
-          body: JSON.stringify({
-            code,
-            chatId: String(chatId),
-            chatTitle,
-            chatType,
-          }),
-          signal: AbortSignal.timeout(backendConfig.backendRequestTimeoutMs ?? 30_000),
-        });
-        const data = (await res.json()) as { success?: boolean; message?: string };
-        const message = typeof data.message === 'string' ? data.message : (data.success ? 'Verified.' : 'Verification failed.');
+        );
+        const data = (await res.json()) as {
+          success?: boolean;
+          message?: string;
+        };
+        const message =
+          typeof data.message === 'string'
+            ? data.message
+            : data.success
+              ? 'Verified.'
+              : 'Verification failed.';
         await ctx.reply(message, { parse_mode: 'Markdown' });
       } catch (err) {
         logger.warn({ chatId, err }, 'verify-from-agent request failed');
@@ -101,6 +113,12 @@ export function registerTextMessageHandler(
       return;
     }
 
+    const agentUserId =
+      userId != null
+        ? `telegram-user-${userId}`
+        : `telegram-chat-${chatId}`;
+    const channelIdStr = String(chatId);
+
     if (parsedCommand.command === 'plan') {
       if (!parsedCommand.args) {
         await ctx.reply('Usage: /plan <prompt>\nExample: /plan Get me the ETH price.');
@@ -108,13 +126,11 @@ export function registerTextMessageHandler(
       }
 
       try {
-        const { agentUserId, plannerResult } = await buildPlannerResultForPrompt({
+        const result = await agentService.plan({
           prompt: parsedCommand.args,
-          chatId,
-          userId,
-          backendContextClient,
-          llmClient,
-          logger,
+          userId: agentUserId,
+          channelId: channelIdStr,
+          channel: 'telegram',
         });
 
         logger.info(
@@ -152,20 +168,13 @@ export function registerTextMessageHandler(
       return;
     }
 
-    let session = sessions.get(chatId);
-    let planToExecute: PlannerResult | undefined = session?.lastPlan;
-    let executionUserId = session?.userId ?? (userId ? `telegram-user-${userId}` : `telegram-chat-${chatId}`);
-
-    if (parsedCommand.args) {
-      try {
-        const { agentUserId, plannerResult } = await buildPlannerResultForPrompt({
-          prompt: parsedCommand.args,
-          chatId,
-          userId,
-          backendContextClient,
-          llmClient,
-          logger,
-        });
+    try {
+      const result = await agentService.execute({
+        prompt: parsedCommand.args || undefined,
+        userId: agentUserId,
+        channelId: channelIdStr,
+        channel: 'telegram',
+      });
 
         logger.info(
           { chatId, userId, workflowName: plannerResult.workflowName, stepCount: plannerResult.steps.length, missingInputsCount: plannerResult.missingInputs.length },

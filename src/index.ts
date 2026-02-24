@@ -1,14 +1,17 @@
 /**
- * FlowForge Agent: single entry point for Telegram updates (webhook).
- * Receives all Telegram updates, handles /plan and /execute, verify-* (via backend),
- * and forwards raw updates to the backend ingest for message storage and chat discovery.
- * Frontend and backend use the backend API for Telegram UI; only this service talks to Telegram.
+ * FlowForge Agent: multi-tenant core with uniform API (POST /v1/plan, POST /v1/execute).
+ * Telegram is one interface (adapter); A2A callers use the same HTTP API.
  */
 import { createTelegramBot, registerBotHandlers } from './bot/register';
 import { loadEnv } from './config/env';
 import { createServer, registerWebhookRoute } from './server/create-server';
 import { BackendContextClient } from './services/backend-client';
 import { LlmServiceClient } from './services/planner-client';
+import { WorkflowClient } from './services/workflow-client';
+import {
+  AgentService,
+  createInMemorySessionStore,
+} from './core';
 
 const TELEGRAM_COMMANDS = [
   {
@@ -38,41 +41,91 @@ async function main() {
     requestTimeoutMs: env.backendRequestTimeoutMs,
   });
 
-  registerBotHandlers(bot, server.log, llmClient, backendContextClient, {
-    backendBaseUrl: env.backendBaseUrl,
-    backendServiceKey: env.backendServiceKey,
-    backendRequestTimeoutMs: env.backendRequestTimeoutMs,
-    frontendBaseUrl: env.frontendBaseUrl,
+  const workflowClient =
+    env.backendBaseUrl != null && env.backendBaseUrl !== ''
+      ? new WorkflowClient({
+          baseUrl: env.backendBaseUrl,
+          serviceKey: env.backendServiceKey,
+          contextPath: '',
+          workflowsPath: '/api/v1/workflows',
+          requestTimeoutMs: env.backendRequestTimeoutMs,
+        })
+      : null;
+
+  const sessionStore = createInMemorySessionStore();
+  const agentService = new AgentService({
+    llmClient,
+    backendContextClient,
+    workflowClient,
+    sessionStore,
+    logger: server.log,
   });
 
-  try {
-    await bot.api.setMyCommands([...TELEGRAM_COMMANDS]);
-    server.log.info({ commands: TELEGRAM_COMMANDS.map((item) => item.command) }, 'Telegram commands configured');
-  } catch (error) {
-    server.log.warn({ error }, 'Failed to configure Telegram commands');
-  }
+  registerUniformApiRoutes(server, {
+    agentService,
+    serviceKey: env.backendServiceKey,
+  });
 
-  if (env.mode === 'webhook') {
-    const ingestConfig =
-      env.backendBaseUrl && env.backendServiceKey
-        ? {
-            backendBaseUrl: env.backendBaseUrl,
-            backendServiceKey: env.backendServiceKey,
-            requestTimeoutMs: env.backendRequestTimeoutMs,
-          }
-        : undefined;
-    registerWebhookRoute(server, bot, env.telegramWebhookPath, ingestConfig);
+  let telegramBot: ReturnType<typeof createTelegramBot> | null = null;
 
-    if (env.appBaseUrl) {
-      const normalizedBaseUrl = env.appBaseUrl.replace(/\/$/, '');
-      const webhookUrl = `${normalizedBaseUrl}${env.telegramWebhookPath}`;
-      await bot.api.setWebhook(webhookUrl, {
-        secret_token: env.telegramWebhookSecret,
-      });
-      server.log.info({ webhookUrl }, 'Telegram webhook configured');
-    } else {
-      server.log.warn('APP_BASE_URL is not set; webhook is not auto-registered');
+  if (env.telegramBotToken) {
+    telegramBot = createTelegramBot(env.telegramBotToken);
+    registerBotHandlers(
+      telegramBot,
+      server.log,
+      agentService,
+      {
+        backendBaseUrl: env.backendBaseUrl,
+        backendServiceKey: env.backendServiceKey,
+        backendRequestTimeoutMs: env.backendRequestTimeoutMs,
+        frontendBaseUrl: env.frontendBaseUrl,
+      },
+      workflowClient,
+    );
+
+    try {
+      await telegramBot.api.setMyCommands([...TELEGRAM_COMMANDS]);
+      server.log.info(
+        { commands: TELEGRAM_COMMANDS.map((c) => c.command) },
+        'Telegram commands configured',
+      );
+    } catch (error) {
+      server.log.warn({ error }, 'Failed to configure Telegram commands');
     }
+
+    if (env.mode === 'webhook') {
+      const ingestConfig =
+        env.backendBaseUrl && env.backendServiceKey
+          ? {
+              backendBaseUrl: env.backendBaseUrl,
+              backendServiceKey: env.backendServiceKey,
+              requestTimeoutMs: env.backendRequestTimeoutMs,
+            }
+          : undefined;
+      registerWebhookRoute(
+        server,
+        telegramBot,
+        env.telegramWebhookPath,
+        ingestConfig,
+      );
+
+      if (env.appBaseUrl) {
+        const normalizedBaseUrl = env.appBaseUrl.replace(/\/$/, '');
+        const webhookUrl = `${normalizedBaseUrl}${env.telegramWebhookPath}`;
+        await telegramBot.api.setWebhook(webhookUrl, {
+          secret_token: env.telegramWebhookSecret,
+        });
+        server.log.info({ webhookUrl }, 'Telegram webhook configured');
+      } else {
+        server.log.warn(
+          'APP_BASE_URL is not set; webhook is not auto-registered',
+        );
+      }
+    }
+  } else {
+    server.log.info(
+      'TELEGRAM_BOT_TOKEN not set; Telegram adapter is disabled. Uniform API (POST /v1/plan, /v1/execute) is available.',
+    );
   }
 
   try {
