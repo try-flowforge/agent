@@ -1,6 +1,9 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { Bot } from 'grammy';
-import { registerTextMessageHandler } from './handlers/text-message';
+import {
+  registerTextMessageHandler,
+  registerOracleCallbackHandler,
+} from './handlers/text-message';
 import type { AgentService } from '../core/agent-service';
 import type { WorkflowClient } from '../services/workflow-client';
 import type { TextHandlerBackendConfig } from './handlers/text-message';
@@ -19,6 +22,14 @@ export function registerBotHandlers(
   workflowClient: WorkflowClient | null,
 ): void {
   registerTextMessageHandler(
+    bot,
+    logger,
+    agentService,
+    backendConfig,
+    workflowClient,
+  );
+
+  registerOracleCallbackHandler(
     bot,
     logger,
     agentService,

@@ -1,12 +1,16 @@
 import type { FastifyBaseLogger } from 'fastify';
 import type { Bot, Context } from 'grammy';
 import type { AgentService } from '../../core/agent-service';
-import type { PlannerResult } from '../../planner/plan-types';
 import type { WorkflowClient } from '../../services/workflow-client';
 import { monitorScheduledWorkflow, monitorSingleExecution } from '../../services/execution-monitor';
+import {
+  ORACLE_TEMPLATE_TOKENS,
+  buildOraclePlan,
+  type OracleTemplateToken,
+} from '../../templates/oracle-template';
 
 type BotLogger = Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
-type SupportedCommand = 'plan' | 'execute';
+type SupportedCommand = 'oracle' | 'swap' | 'aave' | 'perp';
 type ParsedTelegramCommand =
   | { kind: 'supported'; command: SupportedCommand; args: string }
   | { kind: 'unsupported' }
@@ -103,61 +107,79 @@ export function registerTextMessageHandler(
         : `telegram-chat-${chatId}`;
     const channelIdStr = String(chatId);
 
-    if (parsedCommand.command === 'plan') {
-      if (!parsedCommand.args) {
-        await ctx.reply(
-          'Usage: /plan <prompt>\nExample: /plan Get me the ETH price.',
-        );
-        return;
-      }
-
-      try {
-        const result = await agentService.plan({
-          prompt: parsedCommand.args,
-          userId: agentUserId,
-          channelId: channelIdStr,
-          channel: 'telegram',
-        });
-
-        logger.info(
-          {
-            chatId,
-            userId,
-            workflowName: result.plan.workflowName,
-            stepCount: result.plan.steps.length,
-            missingInputsCount: result.plan.missingInputs.length,
-          },
-          'Planner result received for /plan',
-        );
-
-        await replyInChunks(ctx, formatPlannerReply(result.plan));
-      } catch (error) {
-        logger.error(
-          {
-            chatId,
-            userId,
-            errorMessage: error instanceof Error ? error.message : String(error),
-            errorStack: error instanceof Error ? error.stack : undefined,
-          },
-          'Failed to get plan from agent core for /plan',
-        );
-        await ctx.reply(
-          'I could not get a response from the planner. Please try again.',
-        );
-      }
+    if (parsedCommand.command === 'oracle') {
+      await handleOracleCommand(ctx, {
+        logger,
+        agentUserId,
+        channelIdStr,
+        agentService,
+      });
       return;
     }
 
+    if (
+      parsedCommand.command === 'swap' ||
+      parsedCommand.command === 'aave' ||
+      parsedCommand.command === 'perp'
+    ) {
+      await ctx.reply('Coming soon.');
+      return;
+    }
+  });
+}
+
+export function registerOracleCallbackHandler(
+  bot: Bot,
+  logger: BotLogger,
+  agentService: AgentService,
+  backendConfig: TextHandlerBackendConfig | undefined,
+  workflowClient: WorkflowClient | null,
+): void {
+  const frontendBaseUrl = backendConfig?.frontendBaseUrl ?? 'https://flowforge.app';
+
+  bot.on('callback_query:data', async (ctx) => {
+    const data = ctx.callbackQuery.data ?? '';
+    if (!data.startsWith('oracle:')) {
+      return;
+    }
+
+    const tokenId = data.slice('oracle:'.length);
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+
+    if (chatId == null) {
+      await ctx.answerCallbackQuery({
+        text: 'Missing chat context for oracle selection.',
+        show_alert: true,
+      });
+      return;
+    }
+
+    const token = ORACLE_TEMPLATE_TOKENS.find((t) => t.id === tokenId);
+    if (!token) {
+      await ctx.answerCallbackQuery({
+        text: 'Unknown token selection.',
+        show_alert: true,
+      });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+
+    const agentUserId =
+      userId != null ? `telegram-user-${userId}` : `telegram-chat-${chatId}`;
+    const channelIdStr = String(chatId);
+
     if (!workflowClient) {
       await ctx.reply(
-        'Workflow execution is not configured (missing BACKEND_BASE_URL). Set it in .env to use /execute.',
+        'Workflow execution is not configured (missing BACKEND_BASE_URL). Set it in .env to use /oracle.',
       );
       return;
     }
 
     try {
       const result = await agentService.execute({
-        prompt: parsedCommand.args || undefined,
+        plan: buildOraclePlan(token),
         userId: agentUserId,
         channelId: channelIdStr,
         channel: 'telegram',
@@ -170,8 +192,9 @@ export function registerTextMessageHandler(
           workflowId: result.workflowId,
           executionId: result.executionId,
           timeBlockId: result.timeBlockId,
+          tokenId: token.id,
         },
-        'Execute completed from /execute',
+        'Oracle execute completed from callback',
       );
 
       const monitorUserId = result.executionUserId ?? agentUserId;
@@ -194,7 +217,7 @@ export function registerTextMessageHandler(
               workflowId: result.workflowId,
               errorMessage: error instanceof Error ? error.message : String(error),
             },
-            'Scheduled workflow monitor crashed',
+            'Scheduled workflow monitor crashed (oracle)',
           );
         });
       } else if (result.executionId) {
@@ -213,7 +236,7 @@ export function registerTextMessageHandler(
               executionId: result.executionId,
               errorMessage: error instanceof Error ? error.message : String(error),
             },
-            'Single execution monitor crashed',
+            'Single execution monitor crashed (oracle)',
           );
         });
       }
@@ -225,11 +248,64 @@ export function registerTextMessageHandler(
           userId,
           errorMessage: error instanceof Error ? error.message : String(error),
         },
-        'Failed to execute from /execute',
+        'Failed to execute oracle template from callback',
       );
-      await ctx.reply(message);
+      await ctx.reply(`Oracle template failed: ${message}`);
     }
   });
+}
+
+async function handleOracleCommand(
+  ctx: Context,
+  options: {
+    logger: BotLogger;
+    agentUserId: string;
+    channelIdStr: string;
+    agentService: AgentService;
+  },
+): Promise<void> {
+  const {
+    logger,
+    agentUserId,
+    channelIdStr,
+    agentService,
+  } = options;
+  const chatId = ctx.chat?.id;
+  if (chatId == null) {
+    await ctx.reply('Missing chat context for this command.');
+    return;
+  }
+
+  const tokens = ORACLE_TEMPLATE_TOKENS;
+  if (!tokens.length) {
+    await ctx.reply(
+      'Could not load the list of supported tokens. Please try again later.',
+    );
+    return;
+  }
+
+  const keyboard = buildOracleTokenKeyboard(tokens);
+  await ctx.reply(
+    'Choose a token on Arbitrum to fetch its Chainlink price:',
+    { reply_markup: { inline_keyboard: keyboard } },
+  );
+}
+
+function buildOracleTokenKeyboard(
+  tokens: OracleTemplateToken[],
+): Array<Array<{ text: string; callback_data: string }>> {
+  const maxButtonsPerRow = 3;
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < tokens.length; i += maxButtonsPerRow) {
+    const row = tokens
+      .slice(i, i + maxButtonsPerRow)
+      .map((t) => ({
+        text: t.symbol,
+        callback_data: `oracle:${t.id}`,
+      }));
+    rows.push(row);
+  }
+  return rows;
 }
 
 function parseTelegramCommand(text: string): ParsedTelegramCommand {
@@ -243,7 +319,7 @@ function parseTelegramCommand(text: string): ParsedTelegramCommand {
   const command = commandMatch[1].toLowerCase();
   const args = (commandMatch[2] ?? '').trim();
 
-  if (command === 'plan' || command === 'execute') {
+  if (command === 'oracle' || command === 'swap' || command === 'aave' || command === 'perp') {
     return { kind: 'supported', command, args };
   }
 
@@ -253,8 +329,10 @@ function parseTelegramCommand(text: string): ParsedTelegramCommand {
 function formatSupportedCommandsReply(): string {
   return [
     'Use one of these commands:',
-    '/plan <prompt> - Will provide the steps and providers that will be used for the prompt user describes with this command.',
-    '/execute [prompt] - Executes already discussed plan or straight away executes according to accompanying prompt.',
+    '/oracle – Fetch token price via Chainlink on Arbitrum',
+    '/swap – Swap tokens using Li.Fi (coming soon)',
+    '/aave – Lend/borrow using Aave (coming soon)',
+    '/perp – Open a perp position using Ostium (coming soon)',
   ].join('\n');
 }
 
@@ -269,15 +347,15 @@ function translateWorkflowError(error: unknown): string {
   }
 
   if (raw.includes('No plan to execute')) {
-    return 'No plan found for this chat. Run /plan <prompt> first, or use /execute <prompt>.';
+    return 'No plan found for this chat. Use one of the template commands like /oracle.';
   }
 
   if (raw.includes('Cannot execute: plan has missing inputs')) {
-    return 'Cannot execute yet. Add the missing details, then run /execute <updated prompt>.';
+    return 'Cannot execute yet. Please try again with a simpler request or adjust your template choice.';
   }
 
   if (raw.includes('Telegram connection is not linked')) {
-    return 'Telegram connection is not linked for this chat. Send your verify-... code first, then run /execute again.';
+    return 'Telegram connection is not linked for this chat. Send your verify-... code first, then try again.';
   }
 
   const statusMatch = raw.match(
@@ -331,52 +409,4 @@ async function replyInChunks(ctx: Context, text: string): Promise<void> {
     const chunk = text.slice(index, index + maxLength);
     await ctx.reply(chunk);
   }
-}
-
-function formatPlannerReply(plan: PlannerResult): string {
-  const lines: string[] = [];
-  lines.push(`Draft workflow: ${plan.workflowName}`);
-  lines.push(plan.description);
-  lines.push('');
-  lines.push('Proposed steps:');
-  plan.steps.forEach((step, index) => {
-    lines.push(`${index + 1}. ${step.blockId} - ${step.purpose}`);
-    if (step.configHints) {
-      const hints = Object.entries(step.configHints)
-        .map(([key, value]) => `${key}: ${value}`)
-        .join(', ');
-      if (hints) {
-        lines.push(`   hints: ${hints}`);
-      }
-    }
-  });
-
-  if (plan.missingInputs.length > 0) {
-    lines.push('');
-    lines.push('I still need:');
-    plan.missingInputs.forEach((item) => {
-      lines.push(`- ${item.question} (${item.field})`);
-    });
-  }
-
-  if (plan.notes && plan.notes.length > 0) {
-    lines.push('');
-    lines.push('Notes:');
-    plan.notes.forEach((note) => {
-      lines.push(
-        `- [${note.type}] ${note.message}${note.field ? ` (${note.field})` : ''}`,
-      );
-    });
-  }
-
-  lines.push('');
-  if (plan.missingInputs.length > 0) {
-    lines.push(
-      'Add the missing details, then run /plan <updated prompt> or /execute <updated prompt>.',
-    );
-  } else {
-    lines.push('Run /execute to create and run this workflow.');
-  }
-
-  return lines.join('\n');
 }

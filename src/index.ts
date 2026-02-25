@@ -15,16 +15,10 @@ import {
 } from './core';
 
 const TELEGRAM_COMMANDS = [
-  {
-    command: 'plan',
-    description:
-      'Will provide the steps and providers that will be used for the prompt user describes with this command.',
-  },
-  {
-    command: 'execute',
-    description:
-      'Executes already discussed plan or straight away executes according to accompanying prompt.',
-  },
+  { command: 'oracle', description: 'Fetch token price via Chainlink on Arbitrum.' },
+  { command: 'swap', description: 'Swap tokens using Li.Fi (coming soon).' },
+  { command: 'aave', description: 'Lend/borrow using Aave (coming soon).' },
+  { command: 'perp', description: 'Open a perp position using Ostium (coming soon).' },
 ] as const;
 
 async function main() {

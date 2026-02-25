@@ -81,6 +81,16 @@ const CHAINLINK_ETH_USD_AGGREGATORS: Record<string, string> = {
   ETHEREUM: '0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419',
 };
 
+/** Chainlink price feed aggregator addresses by chain and feed symbol (must match backend oracle-feeds). */
+const CHAINLINK_AGGREGATORS_BY_CHAIN: Record<string, Record<string, string>> = {
+  ARBITRUM: {
+    'ETH/USD': '0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612',
+    'BTC/USD': '0x6ce185860a4963106506C203335A2910413708e9',
+    'LINK/USD': '0x86E53CF1B870786351Da77A57575e79CB55812CB',
+    'ARB/USD': '0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6',
+  },
+};
+
 /** Common token addresses by chain (symbol uppercase). Used to build SWAP inputConfig from planner symbols. */
 const COMMON_TOKENS_BY_CHAIN: Record<
   string,
@@ -184,6 +194,27 @@ export function compilePlannerResultToWorkflow(options: CompileWorkflowOptions):
   const stepNodes: CompiledNode[] = stepsToCompile.map((step, index) =>
     compileStepToNode(step, index, chatId, warnings, telegramConnectionId),
   );
+
+  // Post-process nodes: if a TELEGRAM node directly follows an oracle node and
+  // does not have an explicit templated message, default to showing the oracle price.
+  for (let i = 0; i < stepNodes.length; i += 1) {
+    const node = stepNodes[i];
+    const prevNode = i > 0 ? stepNodes[i - 1] : null;
+    if (
+      node.type === 'TELEGRAM' &&
+      prevNode &&
+      (prevNode.type === 'CHAINLINK_PRICE_ORACLE' ||
+        prevNode.type === 'PYTH_PRICE_ORACLE' ||
+        prevNode.type === 'PRICE_ORACLE')
+    ) {
+      const config = node.config as Record<string, unknown>;
+      const message = typeof config.message === 'string' ? config.message : '';
+      // Only override when the planner did not already include a template.
+      if (!message || !message.includes('{{')) {
+        config.message = 'Price: ${{blocks.' + prevNode.id + '.formattedAnswer}}';
+      }
+    }
+  }
   nodes.push(...stepNodes);
 
   // 3) Linear edges: trigger -> first step -> next ...
@@ -522,9 +553,22 @@ function buildBaseConfigForBlock(
       config.chain = chain;
 
       if (provider === 'CHAINLINK' && !config.aggregatorAddress) {
-        const guessed = guessAggregatorFromHints(chain, configHints);
-        if (guessed) {
-          config.aggregatorAddress = guessed;
+        const feedKey =
+          typeof config.feed === 'string' && config.feed.trim()
+            ? String(config.feed).trim().toUpperCase().replace(/\s+/g, '')
+            : '';
+        if (feedKey) {
+          const byChain = CHAINLINK_AGGREGATORS_BY_CHAIN[chain];
+          const addr = byChain?.[feedKey];
+          if (addr) {
+            config.aggregatorAddress = addr;
+          }
+        }
+        if (!config.aggregatorAddress) {
+          const guessed = guessAggregatorFromHints(chain, configHints);
+          if (guessed) {
+            config.aggregatorAddress = guessed;
+          }
         }
       }
 

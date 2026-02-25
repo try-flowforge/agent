@@ -190,7 +190,9 @@ async function waitForSingleExecutionTerminal(
 
       if (state === 'SUCCESS') {
         const message = buildSuccessMessage(status);
-        await safeSendMessage(bot, chatId, message, logger);
+        if (message.trim().length > 0) {
+          await safeSendMessage(bot, chatId, message, logger);
+        }
         return status;
       }
 
@@ -255,9 +257,15 @@ function getTxLinksFromExecution(status: WorkflowExecutionStatus): Array<{ txHas
   return links;
 }
 
-/** Build the success message to send to the user, including tx link(s) if any. */
+/** Build the success message to send to the user, using tx link(s) if any. */
 function buildSuccessMessage(status: WorkflowExecutionStatus): string {
-  return appendTxLinks('Workflow completed successfully.', status);
+  const txLinks = getTxLinksFromExecution(status);
+  if (txLinks.length === 0) return '';
+  const lines: string[] = [];
+  for (const { url } of txLinks) {
+    lines.push(`Transaction: ${url}`);
+  }
+  return lines.join('\n');
 }
 
 /** Append transaction explorer link(s) to a base message when execution produced tx(s). */
