@@ -1,12 +1,27 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { webhookCallback } from 'grammy';
 import type { Bot } from 'grammy';
-import type { BotMode } from '../config/env';
+import Redis from 'ioredis';
+import rateLimit from '@fastify/rate-limit';
+import type { AppEnv } from '../config/env';
 
-export function createServer(mode: BotMode): FastifyInstance {
+export function createServer(env: AppEnv): FastifyInstance {
   const server = Fastify({ logger: true });
 
-  server.get('/health', async () => ({ ok: true, mode }));
+  // Rate limiting
+  const redis = new Redis(env.redisUrl);
+  server.register(rateLimit, {
+    redis,
+    global: true,
+    max: 20,
+    timeWindow: '1 minute',
+    keyGenerator: (request) => {
+      const userId = request.headers['x-on-behalf-of'];
+      return (typeof userId === 'string' ? userId : (request as any).userId) || request.ip;
+    },
+  });
+
+  server.get('/health', async () => ({ ok: true, mode: env.mode }));
 
   return server;
 }

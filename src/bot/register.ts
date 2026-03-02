@@ -4,6 +4,8 @@ import {
   registerTextMessageHandler,
   registerOracleCallbackHandler,
 } from './handlers/text-message';
+import { limit } from '@grammyjs/ratelimiter';
+import Redis from 'ioredis';
 import type { AgentService } from '../core/agent-service';
 import type { WorkflowClient } from '../services/workflow-client';
 import type { TextHandlerBackendConfig } from './handlers/text-message';
@@ -20,7 +22,29 @@ export function registerBotHandlers(
   agentService: AgentService,
   backendConfig: TextHandlerBackendConfig | undefined,
   workflowClient: WorkflowClient | null,
+  rateLimitConfig: {
+    redisUrl: string;
+    limitMax: number;
+    limitWindowMs: number;
+  },
 ): void {
+  // Apply rate limiting middleware
+  const redis = new Redis(rateLimitConfig.redisUrl);
+  bot.use(
+    limit({
+      timeFrame: rateLimitConfig.limitWindowMs,
+      limit: rateLimitConfig.limitMax,
+      storageClient: redis,
+      onLimitExceeded: async (ctx) => {
+        await ctx.reply(
+          'You are sending messages too fast. Please wait a moment.',
+        );
+      },
+      keyGenerator: (ctx) => {
+        return ctx.from?.id.toString() ?? ctx.chat?.id.toString() ?? '';
+      },
+    }),
+  );
   registerTextMessageHandler(
     bot,
     logger,

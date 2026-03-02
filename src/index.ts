@@ -23,7 +23,7 @@ const TELEGRAM_COMMANDS = [
 
 async function main() {
   const env = loadEnv();
-  const server = createServer(env.mode);
+  const server = createServer(env);
 
   const llmClient = new LlmServiceClient({
     baseUrl: env.llmServiceBaseUrl,
@@ -41,12 +41,12 @@ async function main() {
   const workflowClient =
     env.backendBaseUrl != null && env.backendBaseUrl !== ''
       ? new WorkflowClient({
-          baseUrl: env.backendBaseUrl,
-          serviceKey: env.backendServiceKey,
-          contextPath: '',
-          workflowsPath: '/api/v1/workflows',
-          requestTimeoutMs: env.backendRequestTimeoutMs,
-        })
+        baseUrl: env.backendBaseUrl,
+        serviceKey: env.backendServiceKey,
+        contextPath: '',
+        workflowsPath: '/api/v1/workflows',
+        requestTimeoutMs: env.backendRequestTimeoutMs,
+      })
       : null;
 
   const sessionStore = createInMemorySessionStore();
@@ -78,6 +78,11 @@ async function main() {
         frontendBaseUrl: env.frontendBaseUrl,
       },
       workflowClient,
+      {
+        redisUrl: env.redisUrl,
+        limitMax: env.telegramRateLimitMax,
+        limitWindowMs: env.telegramRateLimitWindowMs,
+      },
     );
 
     try {
@@ -94,10 +99,10 @@ async function main() {
       const ingestConfig =
         env.backendBaseUrl && env.backendServiceKey
           ? {
-              backendBaseUrl: env.backendBaseUrl,
-              backendServiceKey: env.backendServiceKey,
-              requestTimeoutMs: env.backendRequestTimeoutMs,
-            }
+            backendBaseUrl: env.backendBaseUrl,
+            backendServiceKey: env.backendServiceKey,
+            requestTimeoutMs: env.backendRequestTimeoutMs,
+          }
           : undefined;
       registerWebhookRoute(
         server,

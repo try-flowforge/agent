@@ -26,6 +26,9 @@ export interface AppEnv {
   backendServiceKey?: string;
   backendContextPath: string;
   frontendBaseUrl: string;
+  redisUrl: string;
+  telegramRateLimitMax: number;
+  telegramRateLimitWindowMs: number;
 }
 
 function requiredEnv(name: string): string {
@@ -76,6 +79,9 @@ export function loadEnv(): AppEnv {
     backendServiceKey: process.env.BACKEND_SERVICE_KEY,
     backendContextPath: process.env.BACKEND_CONTEXT_PATH ?? '/api/v1/agent/context',
     frontendBaseUrl: process.env.FRONTEND_BASE_URL ?? 'https://flowforge.app',
+    redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+    telegramRateLimitMax: parsePositiveInt(process.env.TELEGRAM_RATE_LIMIT_MAX, 5),
+    telegramRateLimitWindowMs: parsePositiveInt(process.env.TELEGRAM_RATE_LIMIT_WINDOW_MS, 10_000),
   };
 }
 
